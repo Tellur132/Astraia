@@ -11,7 +11,7 @@ class QGANKLEvaluatorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.params = {"theta": 0.25, "depth": 2}
         self.config = {
-            "module": "anemoi.evaluators.qgan_kl",
+            "module": "astraia.evaluators.qgan_kl",
             "callable": "create_evaluator",
             "backend": "pennylane",
             "shots": 128,
