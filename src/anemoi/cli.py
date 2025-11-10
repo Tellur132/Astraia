@@ -4,15 +4,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import yaml
+
+if TYPE_CHECKING:
+    from .optimization import OptimizationResult
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Load a qGAN KL optimization configuration and display a concise summary."
+            "Run the qGAN KL optimization loop or inspect the configuration summary."
         )
     )
     parser.add_argument(
@@ -25,6 +28,11 @@ def parse_args() -> argparse.Namespace:
         "--as-json",
         action="store_true",
         help="Print the validated configuration as JSON for downstream tooling.",
+    )
+    parser.add_argument(
+        "--summarize",
+        action="store_true",
+        help="Only print a summary of the configuration without running the loop.",
     )
     return parser.parse_args()
 
@@ -43,7 +51,7 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 
 def validate_config(config: Dict[str, Any]) -> List[str]:
-    """Validate the presence of required fields for the initial MVP step."""
+    """Validate the presence of required fields for the MVP optimization loop."""
 
     def require(path: List[str]) -> str | None:
         current: Any = config
@@ -57,9 +65,14 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
         ["metadata", "name"],
         ["metadata", "description"],
         ["search", "library"],
+        ["search", "direction"],
+        ["search", "metric"],
         ["search", "n_trials"],
         ["stopping", "max_trials"],
         ["report", "metrics"],
+        ["search_space"],
+        ["evaluator", "module"],
+        ["evaluator", "callable"],
     ]
 
     missing = [path for path in (require(p) for p in required_paths) if path is not None]
@@ -80,6 +93,7 @@ def summarize_config(config: Dict[str, Any]) -> str:
         f"  Library      : {search.get('library', 'N/A')}",
         f"  Sampler      : {search.get('sampler', 'N/A')}",
         f"  Trials       : {search.get('n_trials', 'N/A')}",
+        f"  Direction    : {search.get('direction', 'N/A')}",
         f"  Metric       : {search.get('metric', 'kl')}",
         "",
         "[Stopping]",
@@ -95,6 +109,21 @@ def summarize_config(config: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_result(result: "OptimizationResult") -> str:
+    lines = [
+        "Optimization finished.",
+        f"Trials executed : {result.trials_completed}",
+        f"Best value      : {result.best_value}",
+        "Best parameters :",
+    ]
+    lines.extend([f"  - {name}: {value}" for name, value in result.best_params.items()])
+    lines.append("Best metrics    :")
+    lines.extend([f"  - {name}: {value}" for name, value in result.best_metrics.items()])
+    if result.early_stopped_reason:
+        lines.append(f"Early stop      : {result.early_stopped_reason}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -107,8 +136,16 @@ def main() -> None:
 
     if args.as_json:
         print(json.dumps(config, indent=2, ensure_ascii=False))
-    else:
+        return
+
+    if args.summarize:
         print(summarize_config(config))
+        return
+
+    from .optimization import run_optimization
+
+    result = run_optimization(config)
+    print(format_result(result))
 
 
 if __name__ == "__main__":
