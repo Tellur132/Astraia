@@ -87,7 +87,7 @@ flowchart LR
 
 ## 6. ディレクトリ設計（例）
 ```
-Anemoi/
+Anemoi(root)/
 ├── README.md
 ├── pyproject.toml  # Poetry/uv
 ├── src/
