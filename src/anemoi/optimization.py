@@ -6,9 +6,12 @@ import importlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
+import inspect
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 import optuna
+
+from .evaluators import BaseEvaluator
 
 
 @dataclass
@@ -138,8 +141,29 @@ def ensure_directories(config: Mapping[str, Any]) -> None:
 
 def load_evaluator(config: Mapping[str, Any]) -> Callable[[Dict[str, Any], int | None], Dict[str, float]]:
     module = importlib.import_module(config["module"])
-    func = getattr(module, config["callable"])
-    return func
+    target = getattr(module, config["callable"])
+
+    evaluator_obj: Any
+    if isinstance(target, BaseEvaluator):
+        evaluator_obj = target
+    elif isinstance(target, type) and issubclass(target, BaseEvaluator):
+        evaluator_obj = target()  # type: ignore[call-arg]
+    elif callable(target):
+        signature = inspect.signature(target)
+        if len(signature.parameters) <= 1:
+            evaluator_obj = target(config)
+        else:
+            evaluator_obj = target
+    else:
+        raise TypeError(
+            "Evaluator callable must be a function, factory, or BaseEvaluator instance."
+        )
+
+    if isinstance(evaluator_obj, BaseEvaluator):
+        return evaluator_obj.evaluate
+    if callable(evaluator_obj):
+        return evaluator_obj
+    raise TypeError("Evaluator factory did not return a callable or BaseEvaluator instance.")
 
 
 def build_sampler(search_cfg: Mapping[str, Any], seed: int | None) -> optuna.samplers.BaseSampler:
