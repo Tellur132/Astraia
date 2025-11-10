@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 import optuna
 
-from .evaluators import BaseEvaluator
+from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
 
 
 @dataclass
@@ -20,7 +20,7 @@ class OptimizationResult:
 
     trials_completed: int
     best_params: Dict[str, Any]
-    best_metrics: Dict[str, float]
+    best_metrics: Dict[str, MetricValue]
     best_value: float
     early_stopped_reason: str | None = None
 
@@ -48,7 +48,7 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     trials_completed = 0
     early_stop_reason: str | None = None
     best_value: float | None = None
-    best_metrics: Dict[str, float] = {}
+    best_metrics: Dict[str, MetricValue] = {}
     best_params: Dict[str, Any] = {}
 
     with TrialLogger(
@@ -139,7 +139,9 @@ def ensure_directories(config: Mapping[str, Any]) -> None:
         Path(run_root).mkdir(parents=True, exist_ok=True)
 
 
-def load_evaluator(config: Mapping[str, Any]) -> Callable[[Dict[str, Any], int | None], Dict[str, float]]:
+def load_evaluator(
+    config: Mapping[str, Any]
+) -> Callable[[Dict[str, Any], int | None], EvaluatorResult]:
     module = importlib.import_module(config["module"])
     target = getattr(module, config["callable"])
 
@@ -254,7 +256,12 @@ class TrialLogger:
         if write_header:
             self._writer.writeheader()
 
-    def log(self, trial_number: int, params: Mapping[str, Any], metrics: Mapping[str, float]) -> None:
+    def log(
+        self,
+        trial_number: int,
+        params: Mapping[str, Any],
+        metrics: Mapping[str, MetricValue],
+    ) -> None:
         row: Dict[str, Any] = {"trial": trial_number}
         for name in self.param_names:
             row[f"param_{name}"] = params.get(name)
