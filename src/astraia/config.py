@@ -85,16 +85,36 @@ class StoppingConfig(BaseModel):
 class PlannerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: str
-    prompt_template: str
+    backend: str = "rule"
     enabled: bool = False
+    role: str | None = None
+    prompt_template: str | None = None
+    config_path: str | None = None
 
     @model_validator(mode="after")
     def validate_strings(self) -> "PlannerConfig":
-        if not self.role.strip():
-            raise ValueError("planner.role must be a non-empty string")
-        if not self.prompt_template.strip():
-            raise ValueError("planner.prompt_template must be a non-empty string")
+        self.backend = self.backend.lower().strip()
+        if self.backend not in {"rule", "llm"}:
+            raise ValueError("planner.backend must be 'rule' or 'llm'")
+
+        if self.config_path is not None and not self.config_path.strip():
+            raise ValueError("planner.config_path must be a non-empty string when provided")
+
+        if self.backend == "llm":
+            if not (self.role and self.role.strip()):
+                raise ValueError("planner.role must be a non-empty string for llm backend")
+            if not (self.prompt_template and self.prompt_template.strip()):
+                raise ValueError(
+                    "planner.prompt_template must be a non-empty string for llm backend"
+                )
+        else:
+            if self.role is not None and not self.role.strip():
+                raise ValueError("planner.role must be a non-empty string when provided")
+            if self.prompt_template is not None and not self.prompt_template.strip():
+                raise ValueError(
+                    "planner.prompt_template must be a non-empty string when provided"
+                )
+
         return self
 
 

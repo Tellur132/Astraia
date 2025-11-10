@@ -65,6 +65,26 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             OptimizationConfig.model_validate(data)
 
+    def test_planner_backend_validation(self) -> None:
+        data = make_base_config()
+        data["planner"] = {"backend": "invalid", "enabled": True}
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_llm_planner_requires_prompt_and_role(self) -> None:
+        data = make_base_config()
+        data["planner"] = {"backend": "llm", "enabled": True, "prompt_template": ""}
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_llm_usage_log_defaults_to_run_root(self) -> None:
+        data = make_base_config()
+        data["artifacts"] = {"run_root": "runs/demo"}
+        data["llm"] = {"provider": "openai", "model": "gpt-4o"}
+        config = OptimizationConfig.model_validate(data)
+        assert config.llm is not None
+        self.assertEqual(config.llm.usage_log, "runs/demo/llm_usage.csv")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

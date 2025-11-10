@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config(path: Path) -> Dict[str, Any]:
+def load_config(path: Path) -> OptimizationConfig:
     if not path.exists():
         raise SystemExit(f"Configuration file not found: {path}")
 
@@ -74,7 +74,47 @@ def load_config(path: Path) -> Dict[str, Any]:
         message = "Configuration validation failed:\n" + "\n".join(details)
         raise SystemExit(message) from exc
 
-    return validated.model_dump(mode="python")
+    return validated
+
+
+def apply_planner_overrides(
+    config: OptimizationConfig,
+    *,
+    planner: str | None,
+    planner_config: Path | None,
+) -> OptimizationConfig:
+    if planner is None and planner_config is None:
+        return config
+
+    data = config.model_dump(mode="python")
+
+    if planner == "none":
+        data["planner"] = None
+    elif planner is not None:
+        existing = dict(data.get("planner") or {})
+        existing["backend"] = planner
+        existing["enabled"] = True
+        data["planner"] = existing
+
+    if planner_config is not None:
+        if not planner_config.exists():
+            raise SystemExit(f"Planner configuration file not found: {planner_config}")
+        planner_section = data.get("planner")
+        if planner_section is None:
+            raise SystemExit("--planner-config requires a planner to be enabled")
+        updated = dict(planner_section)
+        updated["config_path"] = str(planner_config)
+        data["planner"] = updated
+
+    try:
+        return OptimizationConfig.model_validate(data)
+    except ValidationError as exc:  # pragma: no cover - exercised via CLI tests
+        details = []
+        for error in exc.errors(include_url=False):
+            location = ".".join(str(loc) for loc in error["loc"])
+            details.append(f"- {location or '<root>'}: {error['msg']}")
+        message = "Configuration validation failed after applying planner overrides:\n" + "\n".join(details)
+        raise SystemExit(message) from exc
 
 
 def summarize_config(config: Dict[str, Any]) -> str:
@@ -124,7 +164,13 @@ def format_result(result: "OptimizationResult") -> str:
 
 def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    config_model = load_config(args.config)
+    config_model = apply_planner_overrides(
+        config_model,
+        planner=args.planner,
+        planner_config=args.planner_config,
+    )
+    config = config_model.model_dump(mode="python")
 
     if args.as_json:
         print(json.dumps(config, indent=2, ensure_ascii=False))

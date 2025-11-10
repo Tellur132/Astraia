@@ -6,10 +6,21 @@
 
 Python 3.11 以上を推奨します。依存ライブラリは `PyYAML`、`Optuna`、`Pydantic` を使用します。
 （オフライン環境では最小互換レイヤーが自動ロードされますが、本番では公式実装のインストールを推奨します。）
+OpenAI / Gemini などの LLM を併用する場合はオプショナル依存を extras として指定できます。
+
+```bash
+pip install -e .[openai]
+# または
+pip install -e .[gemini]
+pip install -e .[llm]  # 両方まとめて
+```
 
 ```bash
 pip install -e .
 ```
+
+LLM プロバイダの API キーは `.env` に記載し、`OPENAI_API_KEY` や `GEMINI_API_KEY` を環境変数として読み込ませてください。
+雛形として `.env.example` を用意しています。
 
 ## 使い方
 
@@ -34,9 +45,20 @@ python -m astraia.cli --config configs/qgan_kl.yaml --summarize
 
 # YAML の内容を JSON で出力
 python -m astraia.cli --config configs/qgan_kl.yaml --as-json
+
+# プランナーのバックエンドを一時的に差し替え
+python -m astraia.cli --config configs/qgan_kl.yaml --planner llm \
+  --planner-config planner_prompts/qgan_kl_minimal.txt
 ```
 
 設定ファイルは後続の開発で最適化ループの各コンポーネントに接続するための基礎となります。
+
+### LLM プランナーと Usage ログ
+
+- `configs/base.yaml` に `llm` セクションを追加し、プロバイダ・モデル名・Usage ログ出力先を定義できるようにしました。
+- CLI の `--planner {none|rule|llm}` オプションで YAML の指定を上書きし、`--planner-config` でプランナー固有の設定（例: プロンプトパス）を差し込めます。
+- `runs/<experiment>/llm_usage.csv` に LLM 呼び出しのコスト・再現性メタデータ（プロバイダ、モデル、トークン数、リクエスト ID など）を書き出すためのロガーを実装しました。
+- OpenAI Responses API / Google Gemini の薄いアダプタを `src/astraia/llm_providers/` に追加し、依存が未インストールの場合は `ProviderUnavailableError` で安全にスキップされます。
 
 ## 評価モジュールの構造
 
@@ -80,6 +102,7 @@ python -m astraia.cli --config configs/qgan_kl.yaml --as-json
 - Optuna を用いた最小構成の自動探索ループを実装し、CSV ログと Markdown レポートを生成。
 - Pydantic ベースの設定スキーマを導入し、必須フィールドの存在に加えて範囲や依存関係まで厳密に検証できるようにした。
 - `src/astraia/evaluators` に共通インターフェースと qGAN KL 用アナリティック評価器を追加し、コンフィグで差し替え可能にした。
+- LLM プロバイダ層（OpenAI / Gemini アダプタ）と Usage ログ出力、CLI からのプランナー差し替え機能を導入。
 
 ## 今後のプログラム計画
 
@@ -93,6 +116,7 @@ python -m astraia.cli --config configs/qgan_kl.yaml --as-json
 - [x] 設定ファイルに記載された探索ライブラリと実装コードの接続
 - [x] 評価器プラグインの実装およびテストケースの整備（簡易アナリティック版）
 - [x] 実行ログ・メトリクスのファイル出力サポート
+- [x] LLM プランナーに備えたアダプタ層と Usage ログの基盤整備
 - [ ] CI ワークフローでの自動検証（lint/test）の導入
 - [x] README に最適化ループの使用例と想定される入力/出力サンプルを追加
 
