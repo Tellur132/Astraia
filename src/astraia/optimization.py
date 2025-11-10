@@ -138,6 +138,12 @@ def ensure_directories(config: Mapping[str, Any]) -> None:
     if run_root:
         Path(run_root).mkdir(parents=True, exist_ok=True)
 
+    llm_cfg = config.get("llm")
+    if isinstance(llm_cfg, Mapping):
+        usage_log = llm_cfg.get("usage_log")
+        if usage_log:
+            Path(usage_log).parent.mkdir(parents=True, exist_ok=True)
+
 
 def load_evaluator(
     config: Mapping[str, Any]
