@@ -47,6 +47,32 @@ python -m astraia.cli --config configs/qgan_kl.yaml --as-json
 - 評価結果は `kl`, `depth`, `shots`, `params` の各メトリクスを返し、`search.metric` に設定した主目的（ここでは `kl`）を
   最適化ループが参照します。
 
+### 評価結果 I/F の正式仕様
+
+- すべての評価器は `kl`, `depth`, `shots`, `params` の 4 つのメトリクスを **必ず** `float` 値で返します。追加の診断値は
+  任意に同じ辞書へ含めて構いません。
+- コントロールフィールドとして以下が規約化されています。
+  - `status`: `"ok" | "error" | "timeout"`。省略時は `"ok"` に正規化されます。
+  - `timed_out`: タイムアウトが発生した場合に `True`。既定値は `False`。
+  - `terminated_early`: 評価器側で早期終了した場合に `True`。既定値は `False`。
+  - `elapsed_seconds`: 評価に要した実測時間（秒）。
+  - `reason`: 異常終了やタイムアウト時の理由を示す文字列（任意）。
+- 異常検知時は主要メトリクスに安全側の値を設定しつつ `status` と `reason` を付与します。例:
+
+  ```json
+  {
+    "kl": Infinity,
+    "depth": 1.0,
+    "shots": 256.0,
+    "params": 2.0,
+    "status": "error",
+    "reason": "nan_detected"
+  }
+  ```
+
+- `timeout_seconds` を設定した評価器は、計測時間が上限を超えた場合に `status: "timeout"` と `reason: "timeout_exceeded"`
+  を付与し、`kl` を `Infinity` へフォールバックします。早期終了を意図的に行った場合は `terminated_early: True` を明示してください。
+
 ## 現在の進捗状況
 
 - qGAN KL 最適化の最小構成となる設定ファイル（`configs/qgan_kl.yaml`）を確定。
