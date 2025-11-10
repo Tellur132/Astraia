@@ -35,12 +35,22 @@ python -m anemoi.cli --config configs/qgan_kl.yaml --as-json
 
 設定ファイルは後続の開発で最適化ループの各コンポーネントに接続するための基礎となります。
 
+## 評価モジュールの構造
+
+- すべての評価器は `BaseEvaluator` (`src/anemoi/evaluators/base.py`) を継承するか、同等の `evaluate(params, seed)` メソッドを持つファクトリ
+  から生成します。
+- qGAN KL 用の最小実装は `QGANKLEvaluator` (`src/anemoi/evaluators/qgan_kl.py`) として提供しており、YAML からは
+  `evaluator.callable: create_evaluator` を指定することでインスタンス化されます。
+- 評価結果は `kl`, `depth`, `shots`, `params` の各メトリクスを返し、`search.metric` に設定した主目的（ここでは `kl`）を
+  最適化ループが参照します。
+
 ## 現在の進捗状況
 
 - qGAN KL 最適化の最小構成となる設定ファイル（`configs/qgan_kl.yaml`）を確定。
 - CLI (`python -m anemoi.cli`) から設定ファイルの読み込み・バリデーション・要約表示・JSON 出力に対応。
 - Optuna を用いた最小構成の自動探索ループを実装し、CSV ログと Markdown レポートを生成。
 - MVP 段階で要求される必須フィールド（メタデータ・探索設定・停止条件・レポート設定・評価器）の存在チェックを実装。
+- `src/anemoi/evaluators` に共通インターフェースと qGAN KL 用アナリティック評価器を追加し、コンフィグで差し替え可能にした。
 
 ## 今後のプログラム計画
 
@@ -52,7 +62,15 @@ python -m anemoi.cli --config configs/qgan_kl.yaml --as-json
 ## TODO リスト
 
 - [x] 設定ファイルに記載された探索ライブラリと実装コードの接続
-- [ ] 評価器プラグインの実装およびテストケースの整備
+- [x] 評価器プラグインの実装およびテストケースの整備（簡易アナリティック版）
 - [x] 実行ログ・メトリクスのファイル出力サポート
 - [ ] CI ワークフローでの自動検証（lint/test）の導入
 - [x] README に最適化ループの使用例と想定される入力/出力サンプルを追加
+
+## テスト
+
+ローカルで動作確認する場合は、標準ライブラリの `unittest` を利用したテストスイートを実行できます。
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests
+```

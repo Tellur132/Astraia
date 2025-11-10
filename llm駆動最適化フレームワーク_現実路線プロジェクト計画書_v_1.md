@@ -18,9 +18,10 @@
    - 探索→評価→次点生成の**自動ループ**（Optuna/NEVERGRADいずれかまたは両方）
    - ログ・指標（CSV）と**自動レポート（Markdown/HTML）**
 2. **拡張版**（追加4〜8週間）
-   - **エージェント3役（Planner / Searchers A,B,C / Evaluator）**の差し替え運用
+   - **エージェント3役（Planner / Searchers A,B/C / Evaluator）**の差し替え運用
    - **多目的**（HV: Hypervolume）と**制約**のサポート
    - 可視化ダッシュボード（Weights & Biases / MLflow など。学内PCならPlotly Dash）
+   - **進捗メモ**：評価器インターフェースと qGAN KL アナリティック評価器の試作版を実装済み
 3. **ドキュメント一式**
    - 30分クイックスタート、オンボーディング手順、SOP（実験運用手順）
    - 「途中参加者用」読み進めガイド（本書）
@@ -151,9 +152,9 @@ Anemoi(root)/
 ## 10. 実験運用SOP（標準手順）
 1. `configs/xxx.yaml` を作成  
    - 問題名、パラメタ範囲、目的関数、制約、評価回数、停止条件
-2. `src/evaluators/xxx.py` に評価関数を実装  
-   - I/F: `evaluate(params, seed) -> dict(metrics)`
-3. CLI実行：`python -m src.cli --config configs/xxx.yaml --out runs/exp001`  
+2. `src/anemoi/evaluators/xxx.py` に評価器クラス/ファクトリを実装
+   - I/F: `BaseEvaluator.evaluate(params, seed) -> dict(metrics)` または `create_evaluator(config)` ファクトリ
+3. CLI実行：`python -m anemoi.cli --config configs/xxx.yaml`
 4. 実行後、`runs/exp001/` に**ログと最良解**が保存
 5. `reports/exp001.md` が自動生成 → Gitでコミット
 6. 改善が鈍化したら、Plannerが**探索器の切替/範囲再設計**を提案→再実行
