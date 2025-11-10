@@ -1,0 +1,26 @@
+[project]
+name = "anemoi"
+version = "0.1.0"
+description = "LLM-driven optimization framework (MVP skeleton)."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+  "pyyaml>=6.0",
+]
+authors = [
+  { name = "Anemoi Dev Team" }
+]
+license = { text = "MIT" }
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+anemoi = "anemoi.cli:main"
