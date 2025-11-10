@@ -7,7 +7,7 @@
 Python 3.11 以上を推奨します。依存ライブラリは `PyYAML` と `Optuna` を使用します。
 
 ```bash
-uv pip install -r pyproject.toml  # または pip install -e .
+pip install -e .
 ```
 
 ## 使い方
