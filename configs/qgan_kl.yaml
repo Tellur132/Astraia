@@ -14,6 +14,7 @@ stopping:
   max_time_minutes: 10
   no_improve_patience: 4
 planner:
+  backend: rule
   role: planner
   prompt_template: planner_prompts/qgan_kl_minimal.txt
   enabled: false

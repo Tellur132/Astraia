@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 try:  # pragma: no cover - use real pydantic when available
@@ -84,16 +85,36 @@ class StoppingConfig(BaseModel):
 class PlannerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: str
-    prompt_template: str
+    backend: str = "rule"
     enabled: bool = False
+    role: str | None = None
+    prompt_template: str | None = None
+    config_path: str | None = None
 
     @model_validator(mode="after")
     def validate_strings(self) -> "PlannerConfig":
-        if not self.role.strip():
-            raise ValueError("planner.role must be a non-empty string")
-        if not self.prompt_template.strip():
-            raise ValueError("planner.prompt_template must be a non-empty string")
+        self.backend = self.backend.lower().strip()
+        if self.backend not in {"rule", "llm"}:
+            raise ValueError("planner.backend must be 'rule' or 'llm'")
+
+        if self.config_path is not None and not self.config_path.strip():
+            raise ValueError("planner.config_path must be a non-empty string when provided")
+
+        if self.backend == "llm":
+            if not (self.role and self.role.strip()):
+                raise ValueError("planner.role must be a non-empty string for llm backend")
+            if not (self.prompt_template and self.prompt_template.strip()):
+                raise ValueError(
+                    "planner.prompt_template must be a non-empty string for llm backend"
+                )
+        else:
+            if self.role is not None and not self.role.strip():
+                raise ValueError("planner.role must be a non-empty string when provided")
+            if self.prompt_template is not None and not self.prompt_template.strip():
+                raise ValueError(
+                    "planner.prompt_template must be a non-empty string when provided"
+                )
+
         return self
 
 
@@ -215,6 +236,28 @@ PARAMETER_MODELS = {
 }
 
 
+class LLMConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+    usage_log: str | None = None
+
+    @model_validator(mode="after")
+    def validate_strings(self) -> "LLMConfig":
+        self.provider = self.provider.lower().strip()
+        if not self.provider:
+            raise ValueError("llm.provider must be a non-empty string")
+
+        if not self.model.strip():
+            raise ValueError("llm.model must be a non-empty string")
+
+        if self.usage_log is not None and not self.usage_log.strip():
+            raise ValueError("llm.usage_log must be a non-empty string when provided")
+
+        return self
+
+
 class OptimizationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,6 +266,7 @@ class OptimizationConfig(BaseModel):
     search: SearchConfig
     stopping: StoppingConfig
     planner: PlannerConfig | None = None
+    llm: LLMConfig | None = None
     search_space: Dict[str, Dict[str, Any]]
     evaluator: EvaluatorConfig
     report: ReportConfig
@@ -252,7 +296,16 @@ class OptimizationConfig(BaseModel):
         if primary_metric not in metric_names:
             raise ValueError("search.metric must be included in report.metrics")
 
+        if self.llm is not None and not self.llm.usage_log:
+            run_root = None
+            if self.artifacts is not None:
+                artifacts = self.artifacts.model_dump()
+                run_root = artifacts.get("run_root")
+            if run_root:
+                usage_path = Path(run_root) / "llm_usage.csv"
+                self.llm.usage_log = str(usage_path)
+
         return self
 
 
-__all__ = ["OptimizationConfig", "ValidationError"]
+__all__ = ["OptimizationConfig", "ValidationError", "LLMConfig"]
