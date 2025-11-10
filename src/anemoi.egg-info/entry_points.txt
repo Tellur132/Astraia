@@ -1,0 +1,2 @@
+[console_scripts]
+anemoi = anemoi.cli:main

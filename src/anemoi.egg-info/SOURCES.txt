@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/anemoi/__init__.py
+src/anemoi/cli.py
+src/anemoi/optimization.py
+src/anemoi.egg-info/PKG-INFO
+src/anemoi.egg-info/SOURCES.txt
+src/anemoi.egg-info/dependency_links.txt
+src/anemoi.egg-info/entry_points.txt
+src/anemoi.egg-info/requires.txt
+src/anemoi.egg-info/top_level.txt
+src/anemoi/evaluators/__init__.py
+src/anemoi/evaluators/qgan_kl.py
