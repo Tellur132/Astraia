@@ -1,4 +1,4 @@
-You are the planner for the Anemoi MVP. Your task is to verify that the search space
+You are the planner for the Astraia MVP. Your task is to verify that the search space
 and evaluation constraints are reasonable for a minimal qGAN KL divergence experiment.
 For the first development step the planner is disabled; this prompt is provided so that
 future steps can enable it without changing the configuration schema.

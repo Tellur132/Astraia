@@ -29,7 +29,7 @@ search_space:
     high: 2
     log: false
 evaluator:
-  module: anemoi.evaluators.qgan_kl
+  module: astraia.evaluators.qgan_kl
   callable: create_evaluator
   backend: pennylane
   shots: 256

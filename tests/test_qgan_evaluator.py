@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import unittest
 
-from anemoi.evaluators.qgan_kl import QGANKLEvaluator, create_evaluator
-from anemoi.optimization import load_evaluator
+from astraia.evaluators.qgan_kl import QGANKLEvaluator, create_evaluator
+from astraia.optimization import load_evaluator
 
 
 class QGANKLEvaluatorTests(unittest.TestCase):

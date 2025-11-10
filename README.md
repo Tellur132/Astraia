@@ -1,6 +1,6 @@
-# Anemoi MVP Skeleton
+# Astraia MVP Skeleton
 
-このリポジトリは、LLM駆動最適化フレームワーク「Anemoi」のMVPに向けた初期セットアップです。計画書で示された最初のステップに従い、最小実験サイズの qGAN KL 最適化設定ファイルを確定し、Optuna を用いた自動探索ループまで実行できる CLI を提供しています。
+このリポジトリは、LLM駆動最適化フレームワーク「Astraia」のMVPに向けた初期セットアップです。計画書で示された最初のステップに従い、最小実験サイズの qGAN KL 最適化設定ファイルを確定し、Optuna を用いた自動探索ループまで実行できる CLI を提供しています。
 
 ## セットアップ
 
@@ -15,7 +15,7 @@ uv pip install -r pyproject.toml  # または pip install -e .
 以下のコマンドを実行すると、`configs/qgan_kl.yaml` を読み込み、探索・評価・レポート生成を含む最小構成の最適化ループが走ります。
 
 ```bash
-python -m anemoi.cli --config configs/qgan_kl.yaml
+python -m astraia.cli --config configs/qgan_kl.yaml
 ```
 
 実行後は以下が生成されます。
@@ -27,19 +27,19 @@ CLI には確認用のオプションも用意しています。
 
 ```bash
 # 設定のサマリのみ表示
-python -m anemoi.cli --config configs/qgan_kl.yaml --summarize
+python -m astraia.cli --config configs/qgan_kl.yaml --summarize
 
 # YAML の内容を JSON で出力
-python -m anemoi.cli --config configs/qgan_kl.yaml --as-json
+python -m astraia.cli --config configs/qgan_kl.yaml --as-json
 ```
 
 設定ファイルは後続の開発で最適化ループの各コンポーネントに接続するための基礎となります。
 
 ## 評価モジュールの構造
 
-- すべての評価器は `BaseEvaluator` (`src/anemoi/evaluators/base.py`) を継承するか、同等の `evaluate(params, seed)` メソッドを持つファクトリ
+- すべての評価器は `BaseEvaluator` (`src/astraia/evaluators/base.py`) を継承するか、同等の `evaluate(params, seed)` メソッドを持つファクトリ
   から生成します。
-- qGAN KL 用の最小実装は `QGANKLEvaluator` (`src/anemoi/evaluators/qgan_kl.py`) として提供しており、YAML からは
+- qGAN KL 用の最小実装は `QGANKLEvaluator` (`src/astraia/evaluators/qgan_kl.py`) として提供しており、YAML からは
   `evaluator.callable: create_evaluator` を指定することでインスタンス化されます。
 - 評価結果は `kl`, `depth`, `shots`, `params` の各メトリクスを返し、`search.metric` に設定した主目的（ここでは `kl`）を
   最適化ループが参照します。
@@ -47,15 +47,15 @@ python -m anemoi.cli --config configs/qgan_kl.yaml --as-json
 ## 現在の進捗状況
 
 - qGAN KL 最適化の最小構成となる設定ファイル（`configs/qgan_kl.yaml`）を確定。
-- CLI (`python -m anemoi.cli`) から設定ファイルの読み込み・バリデーション・要約表示・JSON 出力に対応。
+- CLI (`python -m astraia.cli`) から設定ファイルの読み込み・バリデーション・要約表示・JSON 出力に対応。
 - Optuna を用いた最小構成の自動探索ループを実装し、CSV ログと Markdown レポートを生成。
 - MVP 段階で要求される必須フィールド（メタデータ・探索設定・停止条件・レポート設定・評価器）の存在チェックを実装。
-- `src/anemoi/evaluators` に共通インターフェースと qGAN KL 用アナリティック評価器を追加し、コンフィグで差し替え可能にした。
+- `src/astraia/evaluators` に共通インターフェースと qGAN KL 用アナリティック評価器を追加し、コンフィグで差し替え可能にした。
 
 ## 今後のプログラム計画
 
 1. **最適化ループの実装**: 探索ライブラリ（例: Optuna）と評価器を接続し、設定ファイルをもとに自動探索が実行できるようにする。✅ 完了
-2. **評価モジュールの拡充**: `src/anemoi/evaluators` 以下に qGAN 固有の評価ロジックや、将来的な拡張に備えた共通インターフェースを追加。
+2. **評価モジュールの拡充**: `src/astraia/evaluators` 以下に qGAN 固有の評価ロジックや、将来的な拡張に備えた共通インターフェースを追加。
 3. **レポート生成の自動化**: 実験結果を標準化した形式で保存し、再現性と可観測性を高めるためのテンプレートを整備。
 4. **CLI 機能の強化**: 実行モードの切り替え（例: ドライラン / 本番）、進捗表示、ロギング設定などを追加。
 
