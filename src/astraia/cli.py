@@ -4,9 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict
 
 import yaml
+
+try:  # pragma: no cover - prefer real pydantic
+    from pydantic import ValidationError
+except ImportError:  # pragma: no cover - offline fallback
+    from ._compat.pydantic import ValidationError  # type: ignore[assignment]
+
+from .config import OptimizationConfig
 
 if TYPE_CHECKING:
     from .optimization import OptimizationResult
@@ -47,36 +54,17 @@ def load_config(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise SystemExit("Configuration root must be a mapping (YAML dictionary).")
 
-    return data
+    try:
+        validated = OptimizationConfig.model_validate(data)
+    except ValidationError as exc:  # pragma: no cover - exercised via CLI tests
+        details = []
+        for error in exc.errors(include_url=False):
+            location = ".".join(str(loc) for loc in error["loc"])
+            details.append(f"- {location or '<root>'}: {error['msg']}")
+        message = "Configuration validation failed:\n" + "\n".join(details)
+        raise SystemExit(message) from exc
 
-
-def validate_config(config: Dict[str, Any]) -> List[str]:
-    """Validate the presence of required fields for the MVP optimization loop."""
-
-    def require(path: List[str]) -> str | None:
-        current: Any = config
-        for key in path:
-            if not isinstance(current, dict) or key not in current:
-                return ".".join(path)
-            current = current[key]
-        return None
-
-    required_paths = [
-        ["metadata", "name"],
-        ["metadata", "description"],
-        ["search", "library"],
-        ["search", "direction"],
-        ["search", "metric"],
-        ["search", "n_trials"],
-        ["stopping", "max_trials"],
-        ["report", "metrics"],
-        ["search_space"],
-        ["evaluator", "module"],
-        ["evaluator", "callable"],
-    ]
-
-    missing = [path for path in (require(p) for p in required_paths) if path is not None]
-    return missing
+    return validated.model_dump(mode="python")
 
 
 def summarize_config(config: Dict[str, Any]) -> str:
@@ -127,12 +115,6 @@ def format_result(result: "OptimizationResult") -> str:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    missing = validate_config(config)
-    if missing:
-        formatted = ", ".join(missing)
-        raise SystemExit(
-            "Configuration is missing required fields for the MVP step: " + formatted
-        )
 
     if args.as_json:
         print(json.dumps(config, indent=2, ensure_ascii=False))

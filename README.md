@@ -4,7 +4,8 @@
 
 ## セットアップ
 
-Python 3.11 以上を推奨します。依存ライブラリは `PyYAML` と `Optuna` を使用します。
+Python 3.11 以上を推奨します。依存ライブラリは `PyYAML`、`Optuna`、`Pydantic` を使用します。
+（オフライン環境では最小互換レイヤーが自動ロードされますが、本番では公式実装のインストールを推奨します。）
 
 ```bash
 pip install -e .
@@ -23,7 +24,9 @@ python -m astraia.cli --config configs/qgan_kl.yaml
 - `runs/qgan_kl_minimal/log.csv`: 各トライアルのパラメタとメトリクスを記録
 - `reports/qgan_kl_minimal.md`: ベストトライアルの概要レポート
 
-CLI には確認用のオプションも用意しています。
+CLI には確認用のオプションも用意しています。YAML は Pydantic モデルにマップされ、
+必須フィールドの存在だけでなく、型・範囲・依存関係まで厳密に検証されます（例: `search.metric`
+が `report.metrics` に含まれているか、各サーチパラメータの `low < high` が守られているか など）。
 
 ```bash
 # 設定のサマリのみ表示
@@ -49,7 +52,7 @@ python -m astraia.cli --config configs/qgan_kl.yaml --as-json
 - qGAN KL 最適化の最小構成となる設定ファイル（`configs/qgan_kl.yaml`）を確定。
 - CLI (`python -m astraia.cli`) から設定ファイルの読み込み・バリデーション・要約表示・JSON 出力に対応。
 - Optuna を用いた最小構成の自動探索ループを実装し、CSV ログと Markdown レポートを生成。
-- MVP 段階で要求される必須フィールド（メタデータ・探索設定・停止条件・レポート設定・評価器）の存在チェックを実装。
+- Pydantic ベースの設定スキーマを導入し、必須フィールドの存在に加えて範囲や依存関係まで厳密に検証できるようにした。
 - `src/astraia/evaluators` に共通インターフェースと qGAN KL 用アナリティック評価器を追加し、コンフィグで差し替え可能にした。
 
 ## 今後のプログラム計画
