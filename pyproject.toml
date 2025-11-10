@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
   "pyyaml>=6.0",
+  "optuna>=3.6",
 ]
 authors = [
   { name = "Anemoi Dev Team" }
