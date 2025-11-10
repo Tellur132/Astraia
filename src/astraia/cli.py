@@ -41,6 +41,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only print a summary of the configuration without running the loop.",
     )
+    parser.add_argument(
+        "--planner",
+        choices=("none", "rule", "llm"),
+        help="Override planner backend (default: use value from config).",
+    )
+    parser.add_argument(
+        "--planner-config",
+        type=Path,
+        help="Path to planner-specific configuration file.",
+    )
     return parser.parse_args()
 
 

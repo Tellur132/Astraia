@@ -1,0 +1,5 @@
+# Shared defaults for Astraia experiments.
+llm:
+  provider: openai
+  model: gpt-4.1-mini
+  usage_log: runs/base_experiment/llm_usage.csv
