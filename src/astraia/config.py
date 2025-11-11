@@ -301,6 +301,22 @@ class LLMGuidanceConfig(BaseModel):
         return self
 
 
+class MetaSearchConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    interval: int = 10
+    summary_trials: int = 10
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "MetaSearchConfig":
+        if self.interval <= 0:
+            raise ValueError("meta_search.interval must be a positive integer")
+        if self.summary_trials <= 0:
+            raise ValueError("meta_search.summary_trials must be a positive integer")
+        return self
+
+
 class OptimizationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -311,6 +327,7 @@ class OptimizationConfig(BaseModel):
     planner: PlannerConfig | None = None
     llm: LLMConfig | None = None
     llm_guidance: LLMGuidanceConfig | None = None
+    meta_search: MetaSearchConfig | None = None
     search_space: Dict[str, Dict[str, Any]]
     evaluator: EvaluatorConfig
     report: ReportConfig
@@ -355,4 +372,10 @@ class OptimizationConfig(BaseModel):
         return self
 
 
-__all__ = ["OptimizationConfig", "ValidationError", "LLMConfig", "LLMGuidanceConfig"]
+__all__ = [
+    "OptimizationConfig",
+    "ValidationError",
+    "LLMConfig",
+    "LLMGuidanceConfig",
+    "MetaSearchConfig",
+]
