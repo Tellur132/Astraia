@@ -1,6 +1,6 @@
 # Astraia MVP Skeleton
 
-このリポジトリは、LLM 駆動最適化フレームワーク「Astraia」の最小実装（MVP）を収録しています。YAML で定義された最適化設定を読み込み、
+このリポジトリは、LLM 駆動最適化フレームワーク「Astraia」の最小実装（Minimum Viable Product, MVP）を収録しています。YAML で定義された最適化設定を読み込み、
 Optuna ベースの探索ループを実行し、結果を CSV ログおよび Markdown レポートとして保存します。必要に応じて LLM を用いた探索候補提案
 （LLM Guidance）、進行中の探索戦略調整（Meta Search）、失敗シグナルの診断レポート（LLM Critic）も有効化できます。
 
