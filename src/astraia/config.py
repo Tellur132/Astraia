@@ -317,6 +317,27 @@ class MetaSearchConfig(BaseModel):
         return self
 
 
+class LLMCriticConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    max_history: int = 200
+    prompt_preamble: str | None = None
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "LLMCriticConfig":
+        if self.max_history <= 0:
+            raise ValueError("llm_critic.max_history must be a positive integer")
+        if self.prompt_preamble is not None:
+            text = self.prompt_preamble.strip()
+            if not text:
+                raise ValueError(
+                    "llm_critic.prompt_preamble must be a non-empty string when provided"
+                )
+            self.prompt_preamble = text
+        return self
+
+
 class OptimizationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -328,6 +349,7 @@ class OptimizationConfig(BaseModel):
     llm: LLMConfig | None = None
     llm_guidance: LLMGuidanceConfig | None = None
     meta_search: MetaSearchConfig | None = None
+    llm_critic: LLMCriticConfig | None = None
     search_space: Dict[str, Dict[str, Any]]
     evaluator: EvaluatorConfig
     report: ReportConfig
@@ -369,6 +391,9 @@ class OptimizationConfig(BaseModel):
         if self.llm_guidance is not None and self.llm_guidance.enabled and self.llm is None:
             raise ValueError("llm_guidance requires llm configuration when enabled")
 
+        if self.llm_critic is not None and self.llm_critic.enabled and self.llm is None:
+            raise ValueError("llm_critic requires llm configuration when enabled")
+
         return self
 
 
@@ -378,4 +403,5 @@ __all__ = [
     "LLMConfig",
     "LLMGuidanceConfig",
     "MetaSearchConfig",
+    "LLMCriticConfig",
 ]
