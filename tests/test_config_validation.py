@@ -132,6 +132,17 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         assert config.meta_search is not None
         self.assertTrue(config.meta_search.enabled)
 
+    def test_llm_critic_requires_llm_when_enabled(self) -> None:
+        data = make_base_config()
+        data["llm_critic"] = {"enabled": True}
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+        data["llm"] = {"provider": "dummy", "model": "stub"}
+        config = OptimizationConfig.model_validate(data)
+        assert config.llm_critic is not None
+        self.assertTrue(config.llm_critic.enabled)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

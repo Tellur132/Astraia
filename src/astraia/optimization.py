@@ -14,6 +14,7 @@ import optuna
 
 from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
 from .llm_guidance import create_proposal_generator
+from .llm_critic import generate_llm_critique
 from .meta_search import (
     SearchSettings,
     apply_meta_adjustment,
@@ -381,6 +382,8 @@ def build_report(
     report_dir = Path(report_cfg.get("output_dir", "reports"))
     filename = report_cfg.get("filename") or f"{config['metadata']['name']}.md"
     report_path = report_dir / filename
+    log_path = Path(config.get("artifacts", {}).get("log_file", "runs/log.csv"))
+    direction = str(config.get("search", {}).get("direction", "minimize")).lower()
 
     lines: List[str] = [
         f"# Experiment Report — {config['metadata']['name']}",
@@ -398,6 +401,21 @@ def build_report(
     lines.extend([f"- **{name}**: {value}" for name, value in best_metrics.items()])
     if early_stop_reason:
         lines.extend(["", f"_Early stopping_: {early_stop_reason}"])
+
+    critic_section = generate_llm_critique(
+        config=config,
+        metadata=config.get("metadata", {}),
+        primary_metric=config["search"]["metric"],
+        direction=direction,
+        best_params=best_params,
+        best_metrics=best_metrics,
+        trials_completed=trials_completed,
+        early_stop_reason=early_stop_reason,
+        log_path=log_path,
+    )
+    if critic_section:
+        lines.extend(["", "## LLM考察", ""])
+        lines.extend(critic_section)
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
