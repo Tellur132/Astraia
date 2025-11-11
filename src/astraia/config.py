@@ -258,6 +258,49 @@ class LLMConfig(BaseModel):
         return self
 
 
+class LLMGuidanceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    problem_summary: str | None = None
+    objective: str | None = None
+    n_proposals: int = 1
+    max_retries: int = 2
+    base_temperature: float = 0.7
+    min_temperature: float = 0.1
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "LLMGuidanceConfig":
+        if self.enabled:
+            if not (self.problem_summary and self.problem_summary.strip()):
+                raise ValueError(
+                    "llm_guidance.problem_summary must be a non-empty string when enabled"
+                )
+            self.problem_summary = self.problem_summary.strip()
+            if not (self.objective and self.objective.strip()):
+                raise ValueError(
+                    "llm_guidance.objective must be a non-empty string when enabled"
+                )
+            self.objective = self.objective.strip()
+        if self.problem_summary is not None:
+            self.problem_summary = self.problem_summary.strip()
+        if self.objective is not None:
+            self.objective = self.objective.strip()
+        if self.n_proposals <= 0:
+            raise ValueError("llm_guidance.n_proposals must be positive")
+        if self.max_retries < 0:
+            raise ValueError("llm_guidance.max_retries must be non-negative")
+        if self.base_temperature <= 0:
+            raise ValueError("llm_guidance.base_temperature must be positive")
+        if self.min_temperature <= 0:
+            raise ValueError("llm_guidance.min_temperature must be positive")
+        if self.min_temperature > self.base_temperature:
+            raise ValueError(
+                "llm_guidance.min_temperature must be less than or equal to base_temperature"
+            )
+        return self
+
+
 class OptimizationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -267,6 +310,7 @@ class OptimizationConfig(BaseModel):
     stopping: StoppingConfig
     planner: PlannerConfig | None = None
     llm: LLMConfig | None = None
+    llm_guidance: LLMGuidanceConfig | None = None
     search_space: Dict[str, Dict[str, Any]]
     evaluator: EvaluatorConfig
     report: ReportConfig
@@ -305,7 +349,10 @@ class OptimizationConfig(BaseModel):
                 usage_path = Path(run_root) / "llm_usage.csv"
                 self.llm.usage_log = str(usage_path)
 
+        if self.llm_guidance is not None and self.llm_guidance.enabled and self.llm is None:
+            raise ValueError("llm_guidance requires llm configuration when enabled")
+
         return self
 
 
-__all__ = ["OptimizationConfig", "ValidationError", "LLMConfig"]
+__all__ = ["OptimizationConfig", "ValidationError", "LLMConfig", "LLMGuidanceConfig"]

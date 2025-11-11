@@ -85,6 +85,38 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         assert config.llm is not None
         self.assertEqual(config.llm.usage_log, "runs/demo/llm_usage.csv")
 
+    def test_llm_guidance_requires_llm_when_enabled(self) -> None:
+        data = make_base_config()
+        data["llm_guidance"] = {
+            "enabled": True,
+            "problem_summary": "demo",
+            "objective": "minimize",
+        }
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_llm_guidance_requires_problem_and_objective(self) -> None:
+        data = make_base_config()
+        data["llm"] = {"provider": "openai", "model": "gpt-4o"}
+        data["llm_guidance"] = {
+            "enabled": True,
+            "problem_summary": "",
+            "objective": "",
+        }
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_llm_guidance_accepts_disabled_without_llm(self) -> None:
+        data = make_base_config()
+        data["llm_guidance"] = {
+            "enabled": False,
+            "problem_summary": "demo",
+            "objective": "minimize",
+            "n_proposals": 2,
+        }
+        config = OptimizationConfig.model_validate(data)
+        self.assertIsNone(config.llm)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

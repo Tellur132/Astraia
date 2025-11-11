@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import importlib
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import inspect
@@ -12,6 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping
 import optuna
 
 from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
+from .llm_guidance import create_proposal_generator
 
 
 @dataclass
@@ -43,6 +45,14 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     patience = config["stopping"].get("no_improve_patience")
     seed = config.get("seed")
 
+    proposal_generator = create_proposal_generator(
+        config.get("llm_guidance"),
+        config.get("llm"),
+        search_space,
+        seed=seed,
+    )
+    pending_proposals: deque[Dict[str, Any]] = deque()
+
     log_file = Path(config.get("artifacts", {}).get("log_file", "runs/log.csv"))
 
     trials_completed = 0
@@ -65,6 +75,18 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                 if elapsed >= float(max_time_minutes):
                     early_stop_reason = "max_time_minutes reached"
                     break
+
+            if proposal_generator is not None:
+                while not pending_proposals:
+                    remaining = max_trials - trials_completed
+                    if remaining <= 0:
+                        break
+                    batch = proposal_generator.propose_batch(remaining)
+                    if not batch:
+                        break
+                    pending_proposals.extend(batch)
+                if pending_proposals:
+                    study.enqueue_trial(pending_proposals.popleft())
 
             trial = study.ask()
             params = sample_params(trial, search_space)
