@@ -14,14 +14,14 @@
 
 ## 2. 成果物（Deliverables）
 1. **最小MVP**（2週間）
-   - 1つの最適化問題を**スクリプト1本**で回せるCLI（YAML設定読み込み）
-   - 探索→評価→次点生成の**自動ループ**（Optuna/NEVERGRADいずれかまたは両方）
-   - ログ・指標（CSV）と**自動レポート（Markdown/HTML）**
+   - 1つの最適化問題を**スクリプト1本**で回せる CLI（YAML 設定読み込み）
+   - 探索→評価→次点生成の**自動ループ**（初期実装は Optuna に対応済み）
+   - ログ・指標（CSV）と**自動レポート（Markdown）**
 2. **拡張版**（追加4〜8週間）
    - **エージェント3役（Planner / Searchers A,B/C / Evaluator）**の差し替え運用
    - **多目的**（HV: Hypervolume）と**制約**のサポート
    - 可視化ダッシュボード（Weights & Biases / MLflow など。学内PCならPlotly Dash）
-   - **進捗メモ**：評価器インターフェースと qGAN KL アナリティック評価器の試作版に加え、LLM プランナー向けのアダプタ層と Usage ログ基盤を整備済み
+   - **進捗メモ**：評価器インターフェースと qGAN KL アナリティック評価器、LLM ガイダンス/メタ探索/批評モジュール、Usage ログ基盤を整備済み
 3. **ドキュメント一式**
    - 30分クイックスタート、オンボーディング手順、SOP（実験運用手順）
    - 「途中参加者用」読み進めガイド（本書）
@@ -88,20 +88,23 @@ flowchart LR
 
 ## 6. ディレクトリ設計（例）
 ```
-Anemoi(root)/
+Astraia/
 ├── README.md
-├── pyproject.toml  # Poetry/uv
+├── pyproject.toml
 ├── src/
-│   ├── core/          # ループ/共通I/F
-│   ├── agents/        # planner.py, search_a.py, ...
-│   ├── evaluators/    # qgan_kl.py など問題別
-│   ├── utils/         # ロガー、可視化
-│   └── cli.py         # エントリポイント
-├── configs/
-│   ├── qgan_kl.yaml   # 実験用設定ファイル
-│   └── optuna.yaml    # 探索器の設定
-├── runs/              # ログ/成果物
-└── reports/           # 自動生成レポート
+│   └── astraia/
+│       ├── cli.py             # CLI エントリポイント
+│       ├── config.py          # Pydantic ベースの設定スキーマ
+│       ├── optimization.py    # Optuna ループとレポート生成
+│       ├── evaluators/        # 評価器実装（qGAN など）
+│       ├── llm_guidance.py    # LLM ガイダンス
+│       ├── llm_critic.py      # LLM 批評レポート
+│       ├── meta_search.py     # メタ探索アジャスタ
+│       └── llm_providers/     # OpenAI / Gemini アダプタ
+├── configs/                   # 実験用設定ファイル
+├── planner_prompts/           # プランナープロンプトテンプレート
+├── runs/                      # ログ/成果物
+└── reports/                   # 自動生成レポート
 ```
 
 ---
@@ -111,7 +114,7 @@ Anemoi(root)/
 - `configs/*.yaml` を読み、**単目的**の探索ループを自動実行
 - 評価関数は**ユーザ定義のPython関数**を呼び出し（例：qGAN KL）
 - 早期停止（評価回数、改善閾値、時間）
-- ログ（CSV）と最良解のYAML/JSON出力、最終にMarkdownレポートを生成
+- ログ（CSV）と Markdown レポートを自動生成（CLI から JSON 出力オプションも提供）
 
 **完了の定義（DoD）**
 - 任意の連続パラメタ最適化が**再現可能**に1コマンドで走る
@@ -152,35 +155,48 @@ Anemoi(root)/
 ## 10. 実験運用SOP（標準手順）
 1. `configs/xxx.yaml` を作成  
    - 問題名、パラメタ範囲、目的関数、制約、評価回数、停止条件
-2. `src/anemoi/evaluators/xxx.py` に評価器クラス/ファクトリを実装
+2. `src/astraia/evaluators/xxx.py` に評価器クラス/ファクトリを実装
    - I/F: `BaseEvaluator.evaluate(params, seed) -> dict(metrics)` または `create_evaluator(config)` ファクトリ
-3. CLI実行：`python -m anemoi.cli --config configs/xxx.yaml`
+3. CLI実行：`python -m astraia.cli --config configs/xxx.yaml`（`astraia --config ...` も利用可）
 4. 実行後、`runs/exp001/` に**ログと最良解**が保存
 5. `reports/exp001.md` が自動生成 → Gitでコミット
 6. 改善が鈍化したら、Plannerが**探索器の切替/範囲再設計**を提案→再実行
 
 **テンプレ（YAML例）**
 ```yaml
-# configs/qgan_kl.yaml
-problem: qgan_kl
+metadata:
+  name: qgan_kl_minimal
+  description: 最小構成で qGAN KL 発散の最適化を試す設定例
 seed: 42
-n_trials: 200
-searcher: optuna  # {optuna, nevergrad, cmaes}
-params:
-  n_qubits: {min: 3, max: 6, step: 1}
-  depth:    {min: 1, max: 6, step: 1}
-  lr:       {min: 1e-4, max: 5e-2, log: true}
-constraints:
-  max_depth: 6
-  max_params: 256
-objective:
-  primary: kl   # 目的（最小化）
-  secondary: [depth, params]  # 多目的
+search:
+  library: optuna
+  sampler: tpe
+  n_trials: 8
+  direction: minimize
+  metric: kl
 stopping:
-  time_limit_min: 60
-  no_improve_patience: 20
+  max_trials: 8
+  max_time_minutes: 10
+  no_improve_patience: 4
+search_space:
+  theta:
+    type: float
+    low: -3.1416
+    high: 3.1416
+  depth:
+    type: int
+    low: 1
+    high: 2
+evaluator:
+  module: astraia.evaluators.qgan_kl
+  callable: create_evaluator
 report:
+  output_dir: reports
+  filename: qgan_kl_minimal.md
   metrics: [kl, depth, params, shots]
+artifacts:
+  run_root: runs/qgan_kl_minimal
+  log_file: runs/qgan_kl_minimal/log.csv
 ```
 
 ---
