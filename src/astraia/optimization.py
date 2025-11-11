@@ -14,6 +14,11 @@ import optuna
 
 from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
 from .llm_guidance import create_proposal_generator
+from .meta_search import (
+    SearchSettings,
+    apply_meta_adjustment,
+    create_meta_search_adjuster,
+)
 
 
 @dataclass
@@ -32,18 +37,27 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
 
     ensure_directories(config)
     evaluator = load_evaluator(config["evaluator"])
-    library = str(config["search"].get("library", "")).lower()
+    search_cfg: Dict[str, Any] = dict(config["search"])
+    library = str(search_cfg.get("library", "")).lower()
     if library != "optuna":
         raise ValueError(f"Unsupported search library: {library or 'unknown'}")
-    sampler = build_sampler(config["search"], config.get("seed"))
-    study = create_study(config["search"], sampler)
+    sampler = build_sampler(search_cfg, config.get("seed"))
+    study = create_study(search_cfg, sampler)
 
-    search_space = config["search_space"]
-    metric_name = config["search"]["metric"]
-    max_trials = int(config["stopping"].get("max_trials", config["search"]["n_trials"]))
+    search_space = {name: dict(spec) for name, spec in config["search_space"].items()}
+    metric_name = search_cfg["metric"]
+    max_trials = int(config["stopping"].get("max_trials", search_cfg["n_trials"]))
     max_time_minutes = config["stopping"].get("max_time_minutes")
-    patience = config["stopping"].get("no_improve_patience")
+    patience_value = config["stopping"].get("no_improve_patience")
     seed = config.get("seed")
+
+    target_trials = int(search_cfg.get("n_trials", max_trials))
+    settings = SearchSettings(
+        sampler=str(search_cfg.get("sampler", "tpe")).lower(),
+        max_trials=max_trials,
+        trial_budget=min(target_trials, max_trials),
+        patience=int(patience_value) if patience_value is not None else None,
+    )
 
     proposal_generator = create_proposal_generator(
         config.get("llm_guidance"),
@@ -69,7 +83,16 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         start_ts = time.time()
         no_improve_counter = 0
 
-        for _ in range(max_trials):
+        meta_adjuster = create_meta_search_adjuster(
+            config.get("meta_search"),
+            config.get("llm"),
+            direction=study.direction,
+            metric_name=metric_name,
+            search_space=search_space,
+            seed=seed,
+        )
+
+        while trials_completed < settings.max_trials:
             if max_time_minutes is not None:
                 elapsed = (time.time() - start_ts) / 60
                 if elapsed >= float(max_time_minutes):
@@ -116,11 +139,44 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
             else:
                 no_improve_counter += 1
 
-            if patience is not None and no_improve_counter >= int(patience):
+            if meta_adjuster is not None:
+                adjustment = meta_adjuster.register_trial(
+                    trial_number=trial.number,
+                    value=primary_value,
+                    improved=improved,
+                    params=params,
+                    metrics=metrics,
+                    best_value=best_value,
+                    best_params=best_params,
+                    trials_completed=trials_completed,
+                    settings=settings,
+                )
+                if adjustment is not None:
+                    messages = apply_meta_adjustment(
+                        adjustment,
+                        study=study,
+                        search_cfg=search_cfg,
+                        search_space=search_space,
+                        best_params=best_params,
+                        settings=settings,
+                        trials_completed=trials_completed,
+                        seed=seed,
+                        sampler_builder=build_sampler,
+                    )
+                    if messages:
+                        print(f"[meta:{adjustment.source}] " + " | ".join(messages))
+
+            if (
+                settings.patience is not None
+                and no_improve_counter >= int(settings.patience)
+            ):
                 early_stop_reason = "no_improve_patience reached"
                 break
 
-            if trials_completed >= int(config["search"].get("n_trials", max_trials)):
+            if trials_completed >= settings.trial_budget:
+                break
+
+            if trials_completed >= settings.max_trials:
                 break
 
     if trials_completed == 0:

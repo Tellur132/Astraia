@@ -117,6 +117,21 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         config = OptimizationConfig.model_validate(data)
         self.assertIsNone(config.llm)
 
+    def test_meta_search_validation(self) -> None:
+        data = make_base_config()
+        data["meta_search"] = {"enabled": True, "interval": 0, "summary_trials": 5}
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+        data["meta_search"] = {"enabled": True, "interval": 5, "summary_trials": 0}
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+        data["meta_search"] = {"enabled": True, "interval": 3, "summary_trials": 2}
+        config = OptimizationConfig.model_validate(data)
+        assert config.meta_search is not None
+        self.assertTrue(config.meta_search.enabled)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

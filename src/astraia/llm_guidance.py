@@ -19,6 +19,47 @@ from .llm_providers import (
 )
 
 
+def create_llm_provider(
+    llm_cfg: Mapping[str, Any] | None,
+) -> tuple[Any | None, LLMUsageLogger | None]:
+    """Instantiate an LLM provider and optional usage logger."""
+
+    if llm_cfg is None:
+        return None, None
+
+    usage_logger: LLMUsageLogger | None = None
+    usage_log_path = llm_cfg.get("usage_log")
+    if usage_log_path:
+        usage_logger = LLMUsageLogger(usage_log_path)
+
+    provider_name = str(llm_cfg.get("provider", "")).lower()
+    model_name = llm_cfg.get("model")
+    if not provider_name or not model_name:
+        return None, usage_logger
+
+    provider: Any | None = None
+    try:
+        if provider_name == "openai":
+            provider = OpenAIProvider(model=model_name)
+        elif provider_name == "gemini":
+            provider = GeminiProvider(model=model_name)
+        else:
+            warnings.warn(
+                f"Unknown LLM provider '{provider_name}', falling back to no provider.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    except ProviderUnavailableError as exc:
+        warnings.warn(
+            f"LLM provider '{provider_name}' unavailable ({exc}); using fallback heuristics.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        provider = None
+
+    return provider, usage_logger
+
+
 @dataclass
 class PromptCache:
     """Lightweight in-memory cache for parsed proposal lists."""
@@ -382,36 +423,7 @@ def create_proposal_generator(
     base_temperature = float(guidance_cfg.get("base_temperature", 0.7))
     min_temperature = float(guidance_cfg.get("min_temperature", 0.1))
 
-    usage_logger = None
-    provider = None
-
-    if llm_cfg is not None:
-        usage_log_path = llm_cfg.get("usage_log")
-        if usage_log_path:
-            usage_logger = LLMUsageLogger(usage_log_path)
-
-        provider_name = str(llm_cfg.get("provider", "")).lower()
-        model_name = llm_cfg.get("model")
-        if provider_name and model_name:
-            try:
-                if provider_name == "openai":
-                    provider = OpenAIProvider(model=model_name)
-                elif provider_name == "gemini":
-                    provider = GeminiProvider(model=model_name)
-                else:
-                    warnings.warn(
-                        f"Unknown LLM provider '{provider_name}', falling back to random proposals.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    provider = None
-            except ProviderUnavailableError as exc:
-                warnings.warn(
-                    f"LLM provider '{provider_name}' unavailable ({exc}); using random proposals.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                provider = None
+    provider, usage_logger = create_llm_provider(llm_cfg)
 
     return LLMProposalGenerator(
         search_space=search_space,
@@ -431,5 +443,6 @@ def create_proposal_generator(
 __all__ = [
     "LLMProposalGenerator",
     "PromptCache",
+    "create_llm_provider",
     "create_proposal_generator",
 ]
