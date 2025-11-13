@@ -21,7 +21,8 @@ pip install -e .
 ```
 
 LLM プロバイダの API キーは `.env` に記載し、`OPENAI_API_KEY` や `GEMINI_API_KEY` を環境変数として読み込ませてください。
-雛形として `.env.example` を用意しています。
+CLI は LLM プロバイダが設定されている場合に `.env` の必須キーを検証し、自動的に環境変数へ読み込みます。雛形として `.env.example`
+を用意しています。
 
 ## 使い方
 
@@ -63,6 +64,7 @@ python -m astraia.cli --config configs/qgan_kl.yaml --planner llm \
 | `--as-json` | バリデーション済み設定を JSON で表示 |
 | `--planner {none,rule,llm}` | 設定ファイルのプランナー指定を一時的に上書き |
 | `--planner-config PATH` | プランナー固有設定のパスを注入（例: プロンプトファイル） |
+| `--dry-run` | 実行せずに `.env` の秘密鍵を検証し、LLM プロバイダへ疎通確認を実施 |
 
 ## 設定ファイルの構成
 

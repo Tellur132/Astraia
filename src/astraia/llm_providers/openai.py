@@ -65,6 +65,17 @@ class OpenAIProvider:
 
         return LLMResult(content=content, usage=usage, raw_response=response)
 
+    def ping(self) -> None:
+        """Issue a lightweight request to verify API connectivity."""
+
+        if OpenAI is None:  # pragma: no cover - environment dependent
+            raise ProviderUnavailableError("openai package is not installed")
+
+        try:
+            self._client.models.list()
+        except Exception as exc:  # pragma: no cover - depends on network
+            raise RuntimeError("OpenAI ping failed") from exc
+
 
 def _extract_text(response: Any) -> str:
     """Best-effort extraction of text content from an OpenAI response."""

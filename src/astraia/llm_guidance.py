@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import os
 import random
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
 import warnings
@@ -21,6 +22,8 @@ from .llm_providers import (
 
 def create_llm_provider(
     llm_cfg: Mapping[str, Any] | None,
+    *,
+    strict: bool = False,
 ) -> tuple[Any | None, LLMUsageLogger | None]:
     """Instantiate an LLM provider and optional usage logger."""
 
@@ -40,16 +43,28 @@ def create_llm_provider(
     provider: Any | None = None
     try:
         if provider_name == "openai":
-            provider = OpenAIProvider(model=model_name)
+            api_key = os.environ.get("OPENAI_API_KEY") or None
+            organization = os.environ.get("OPENAI_ORG_ID") or None
+            provider = OpenAIProvider(
+                model=str(model_name),
+                api_key=api_key,
+                organization=organization,
+            )
         elif provider_name == "gemini":
-            provider = GeminiProvider(model=model_name)
+            api_key = os.environ.get("GEMINI_API_KEY") or None
+            provider = GeminiProvider(model=str(model_name), api_key=api_key)
         else:
+            message = f"Unknown LLM provider '{provider_name}', falling back to no provider."
+            if strict:
+                raise ValueError(message)
             warnings.warn(
-                f"Unknown LLM provider '{provider_name}', falling back to no provider.",
+                message,
                 RuntimeWarning,
                 stacklevel=2,
             )
     except ProviderUnavailableError as exc:
+        if strict:
+            raise
         warnings.warn(
             f"LLM provider '{provider_name}' unavailable ({exc}); using fallback heuristics.",
             RuntimeWarning,

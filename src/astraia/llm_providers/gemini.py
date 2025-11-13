@@ -59,6 +59,17 @@ class GeminiProvider:
 
         return LLMResult(content=text, usage=usage, raw_response=response)
 
+    def ping(self) -> None:
+        """Perform a lightweight connectivity check against the Gemini API."""
+
+        if genai is None:  # pragma: no cover - environment dependent
+            raise ProviderUnavailableError("google-generativeai package is not installed")
+
+        try:
+            genai.get_model(self._model_name)
+        except Exception as exc:  # pragma: no cover - depends on network
+            raise RuntimeError("Gemini ping failed") from exc
+
 
 def _extract_usage(response: Any, *, provider: str, model: str) -> LLMUsage | None:
     metadata = getattr(response, "usage_metadata", None)
