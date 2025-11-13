@@ -37,8 +37,8 @@ class SearchConfig(BaseModel):
     library: str = "optuna"
     sampler: str = "tpe"
     n_trials: int
-    direction: str
-    metric: str
+    direction: str | List[str]
+    metric: str | List[str]
     study_name: str | None = None
 
     @model_validator(mode="after")
@@ -48,20 +48,71 @@ class SearchConfig(BaseModel):
             raise ValueError("search.library must be 'optuna'")
 
         self.sampler = self.sampler.lower().strip()
-        if self.sampler not in {"tpe", "random"}:
-            raise ValueError("search.sampler must be 'tpe' or 'random'")
+        allowed_samplers = {
+            "tpe",
+            "random",
+            "nsga2",
+            "motpe",
+            "nsgaiii",
+            "moead",
+            "mocma",
+        }
+        if self.sampler not in allowed_samplers:
+            raise ValueError(
+                "search.sampler must be one of " + ", ".join(sorted(allowed_samplers))
+            )
 
-        self.direction = self.direction.lower().strip()
-        if self.direction not in {"minimize", "maximize"}:
-            raise ValueError("search.direction must be 'minimize' or 'maximize'")
+        directions = self._normalise_sequence(self.direction, field="direction")
+        normalised_dirs: List[str] = []
+        for direction in directions:
+            direction_lc = direction.lower().strip()
+            if direction_lc not in {"minimize", "maximize"}:
+                raise ValueError("search.direction entries must be 'minimize' or 'maximize'")
+            normalised_dirs.append(direction_lc)
+        self.direction = (
+            normalised_dirs[0] if len(normalised_dirs) == 1 else normalised_dirs
+        )
 
         if self.n_trials <= 0:
             raise ValueError("search.n_trials must be a positive integer")
 
-        if not self.metric.strip():
-            raise ValueError("search.metric must be a non-empty string")
+        metrics = self._normalise_sequence(self.metric, field="metric")
+        normalised_metrics: List[str] = []
+        for metric in metrics:
+            metric_name = metric.strip()
+            if not metric_name:
+                raise ValueError("search.metric entries must be non-empty strings")
+            normalised_metrics.append(metric_name)
+        self.metric = normalised_metrics[0] if len(normalised_metrics) == 1 else normalised_metrics
+
+        if len(self.metric_names) != len(self.direction_names):
+            raise ValueError(
+                "search.metric and search.direction must have the same number of entries"
+            )
 
         return self
+
+    @property
+    def metric_names(self) -> List[str]:
+        if isinstance(self.metric, str):
+            return [self.metric]
+        return list(self.metric)
+
+    @property
+    def direction_names(self) -> List[str]:
+        if isinstance(self.direction, str):
+            return [self.direction]
+        return list(self.direction)
+
+    @staticmethod
+    def _normalise_sequence(value: str | List[str], *, field: str) -> List[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            if not value:
+                raise ValueError(f"search.{field} must not be empty")
+            return list(value)
+        raise TypeError(f"search.{field} must be a string or list of strings")
 
 
 class StoppingConfig(BaseModel):
@@ -70,6 +121,8 @@ class StoppingConfig(BaseModel):
     max_trials: int
     max_time_minutes: float | None = None
     no_improve_patience: int | None = None
+    cost_metric: str | None = None
+    max_total_cost: float | None = None
 
     @model_validator(mode="after")
     def validate_numbers(self) -> "StoppingConfig":
@@ -79,6 +132,17 @@ class StoppingConfig(BaseModel):
             raise ValueError("stopping.max_time_minutes must be positive when provided")
         if self.no_improve_patience is not None and self.no_improve_patience <= 0:
             raise ValueError("stopping.no_improve_patience must be positive when provided")
+        if self.cost_metric is not None:
+            metric = self.cost_metric.strip()
+            if not metric:
+                raise ValueError("stopping.cost_metric must be a non-empty string when provided")
+            self.cost_metric = metric
+        if self.max_total_cost is not None and self.max_total_cost <= 0:
+            raise ValueError("stopping.max_total_cost must be positive when provided")
+        if self.max_total_cost is not None and self.cost_metric is None:
+            raise ValueError(
+                "stopping.cost_metric must be specified when max_total_cost is provided"
+            )
         return self
 
 
@@ -374,10 +438,11 @@ class OptimizationConfig(BaseModel):
 
         self.search_space = normalised_space
 
-        primary_metric = self.search.metric.lower()
         metric_names = {metric.lower() for metric in self.report.metrics}
-        if primary_metric not in metric_names:
-            raise ValueError("search.metric must be included in report.metrics")
+        search_metrics = [metric.lower() for metric in self.search.metric_names]
+        missing = [metric for metric in search_metrics if metric not in metric_names]
+        if missing:
+            raise ValueError("search.metric entries must be included in report.metrics")
 
         if self.llm is not None and not self.llm.usage_log:
             run_root = None
