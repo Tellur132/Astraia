@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Mapping
 
 import yaml
 
@@ -14,6 +15,8 @@ except ImportError:  # pragma: no cover - offline fallback
     from ._compat.pydantic import ValidationError  # type: ignore[assignment]
 
 from .config import OptimizationConfig
+from .llm_guidance import create_llm_provider
+from .llm_providers import ProviderUnavailableError
 
 if TYPE_CHECKING:
     from .optimization import OptimizationResult
@@ -50,6 +53,14 @@ def parse_args() -> argparse.Namespace:
         "--planner-config",
         type=Path,
         help="Path to planner-specific configuration file.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Validate configuration and ping the configured LLM provider without running the"
+            " optimization loop."
+        ),
     )
     return parser.parse_args()
 
@@ -117,6 +128,119 @@ def apply_planner_overrides(
         raise SystemExit(message) from exc
 
 
+_ENV_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY",),
+}
+
+
+def parse_env_file(path: Path) -> Dict[str, str]:
+    """Parse key-value pairs from a dotenv-style file."""
+
+    values: Dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            key = key.strip()
+            value = raw_value.strip()
+            if (value.startswith("\"") and value.endswith("\"")) or (
+                value.startswith("'") and value.endswith("'")
+            ):
+                value = value[1:-1]
+            values[key] = value
+    return values
+
+
+def ensure_env_keys(
+    llm_cfg: Mapping[str, Any] | None,
+    *,
+    env_path: Path,
+) -> Dict[str, str]:
+    """Validate that required secrets for the configured provider exist in the .env file."""
+
+    if llm_cfg is None:
+        return {}
+
+    provider = str(llm_cfg.get("provider", "")).strip().lower()
+    if not provider:
+        return {}
+
+    required = _ENV_REQUIREMENTS.get(provider)
+    if not required:
+        return {}
+
+    if not env_path.exists():
+        raise SystemExit(
+            f"LLM provider '{provider}' requires {', '.join(required)} defined in {env_path}."
+        )
+
+    env_values = parse_env_file(env_path)
+    loaded: Dict[str, str] = {}
+    missing: list[str] = []
+    for key in required:
+        value = env_values.get(key, "").strip()
+        if value:
+            loaded[key] = value
+        else:
+            missing.append(key)
+
+    if missing:
+        joined = ", ".join(missing)
+        raise SystemExit(
+            f"Missing required secrets in {env_path} for provider '{provider}': {joined}."
+        )
+
+    for key, value in loaded.items():
+        if not os.environ.get(key):
+            os.environ[key] = value
+
+    return loaded
+
+
+def ping_llm_provider(llm_cfg: Mapping[str, Any] | None) -> None:
+    """Instantiate the configured provider and perform a connectivity check."""
+
+    if llm_cfg is None:
+        print("Dry run: no LLM provider configured; nothing to ping.")
+        return
+
+    provider_name = str(llm_cfg.get("provider", "")).strip().lower()
+    model_name = str(llm_cfg.get("model", "")).strip()
+
+    if not provider_name:
+        print("Dry run: LLM provider not specified; nothing to ping.")
+        return
+
+    try:
+        provider, _ = create_llm_provider(llm_cfg, strict=True)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    except ProviderUnavailableError as exc:
+        raise SystemExit(f"LLM provider '{provider_name}' unavailable: {exc}") from exc
+
+    if provider is None:
+        raise SystemExit(
+            f"LLM provider '{provider_name}' could not be instantiated for ping operations."
+        )
+
+    ping_method = getattr(provider, "ping", None)
+    if ping_method is None:
+        raise SystemExit(f"LLM provider '{provider_name}' does not support connectivity checks.")
+
+    try:
+        ping_method()
+    except Exception as exc:  # pragma: no cover - dependent on network and SDK behaviour
+        raise SystemExit(f"Failed to ping LLM provider '{provider_name}': {exc}") from exc
+
+    descriptor = model_name or "<unknown model>"
+    print(f"Dry run: successfully pinged provider '{provider_name}' with model '{descriptor}'.")
+
+
 def summarize_config(config: Dict[str, Any]) -> str:
     metadata = config.get("metadata", {})
     search = config.get("search", {})
@@ -181,6 +305,9 @@ def format_result(result: "OptimizationResult") -> str:
 
 def main() -> None:
     args = parse_args()
+    if args.dry_run and (args.as_json or args.summarize):
+        raise SystemExit("--dry-run cannot be combined with --as-json or --summarize")
+
     config_model = load_config(args.config)
     config_model = apply_planner_overrides(
         config_model,
@@ -189,12 +316,19 @@ def main() -> None:
     )
     config = config_model.model_dump(mode="python")
 
+    env_file = Path(os.environ.get("ASTRAIA_ENV_FILE", ".env"))
+    ensure_env_keys(config.get("llm"), env_path=env_file)
+
     if args.as_json:
         print(json.dumps(config, indent=2, ensure_ascii=False))
         return
 
     if args.summarize:
         print(summarize_config(config))
+        return
+
+    if args.dry_run:
+        ping_llm_provider(config.get("llm"))
         return
 
     from .optimization import run_optimization
