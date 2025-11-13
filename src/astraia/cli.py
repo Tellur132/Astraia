@@ -123,6 +123,17 @@ def summarize_config(config: Dict[str, Any]) -> str:
     stopping = config.get("stopping", {})
     report = config.get("report", {})
 
+    direction = search.get("direction", "N/A")
+    if isinstance(direction, list):
+        direction_display = ", ".join(str(item) for item in direction)
+    else:
+        direction_display = str(direction)
+    metric = search.get("metric", "kl")
+    if isinstance(metric, list):
+        metric_display = ", ".join(str(item) for item in metric)
+    else:
+        metric_display = str(metric)
+
     lines = [
         f"Experiment name : {metadata.get('name', 'N/A')}",
         f"Description    : {metadata.get('description', 'N/A')}",
@@ -131,8 +142,8 @@ def summarize_config(config: Dict[str, Any]) -> str:
         f"  Library      : {search.get('library', 'N/A')}",
         f"  Sampler      : {search.get('sampler', 'N/A')}",
         f"  Trials       : {search.get('n_trials', 'N/A')}",
-        f"  Direction    : {search.get('direction', 'N/A')}",
-        f"  Metric       : {search.get('metric', 'kl')}",
+        f"  Direction    : {direction_display}",
+        f"  Metric       : {metric_display}",
         "",
         "[Stopping]",
         f"  max_trials   : {stopping.get('max_trials', 'N/A')}",
@@ -157,6 +168,12 @@ def format_result(result: "OptimizationResult") -> str:
     lines.extend([f"  - {name}: {value}" for name, value in result.best_params.items()])
     lines.append("Best metrics    :")
     lines.extend([f"  - {name}: {value}" for name, value in result.best_metrics.items()])
+    if result.total_cost is not None:
+        lines.append(f"Total cost      : {result.total_cost}")
+    if result.hypervolume is not None:
+        lines.append(f"Hypervolume     : {result.hypervolume}")
+    if result.pareto_front:
+        lines.append(f"Pareto points   : {len(result.pareto_front)}")
     if result.early_stopped_reason:
         lines.append(f"Early stop      : {result.early_stopped_reason}")
     return "\n".join(lines)

@@ -45,10 +45,33 @@ class OptimizationConfigValidationTests(unittest.TestCase):
     def test_valid_configuration_passes(self) -> None:
         config = OptimizationConfig.model_validate(make_base_config())
         self.assertEqual(config.search.metric, "kl")
+        self.assertEqual(config.search.metric_names, ["kl"])
 
     def test_metric_must_be_in_report_metrics(self) -> None:
         data = make_base_config()
         data["report"]["metrics"] = ["depth"]
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_multi_objective_configuration(self) -> None:
+        data = make_base_config()
+        data["search"]["metric"] = ["kl", "depth"]
+        data["search"]["direction"] = ["minimize", "minimize"]
+        data["report"]["metrics"] = ["kl", "depth", "shots"]
+        config = OptimizationConfig.model_validate(data)
+        self.assertEqual(config.search.metric_names, ["kl", "depth"])
+        self.assertEqual(config.search.direction_names, ["minimize", "minimize"])
+
+    def test_metric_and_direction_length_must_match(self) -> None:
+        data = make_base_config()
+        data["search"]["metric"] = ["kl", "depth"]
+        data["search"]["direction"] = "minimize"
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_cost_budget_requires_metric(self) -> None:
+        data = make_base_config()
+        data["stopping"]["max_total_cost"] = 100
         with self.assertRaises(ValidationError):
             OptimizationConfig.model_validate(data)
 

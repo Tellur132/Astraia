@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import csv
 import importlib
+import math
+import random
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import inspect
-from typing import Any, Callable, Dict, Iterable, List, Mapping
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 
 import optuna
 
@@ -31,6 +33,9 @@ class OptimizationResult:
     best_metrics: Dict[str, MetricValue]
     best_value: float
     early_stopped_reason: str | None = None
+    pareto_front: List[Dict[str, Any]] | None = None
+    hypervolume: float | None = None
+    total_cost: float | None = None
 
 
 def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
@@ -42,14 +47,23 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     library = str(search_cfg.get("library", "")).lower()
     if library != "optuna":
         raise ValueError(f"Unsupported search library: {library or 'unknown'}")
-    sampler = build_sampler(search_cfg, config.get("seed"))
-    study = create_study(search_cfg, sampler)
-
     search_space = {name: dict(spec) for name, spec in config["search_space"].items()}
-    metric_name = search_cfg["metric"]
-    max_trials = int(config["stopping"].get("max_trials", search_cfg["n_trials"]))
-    max_time_minutes = config["stopping"].get("max_time_minutes")
-    patience_value = config["stopping"].get("no_improve_patience")
+    metric_names = _normalise_objective_names(search_cfg.get("metric"))
+    direction_names = _normalise_direction_names(
+        search_cfg.get("direction", "minimize"),
+        expected=len(metric_names),
+    )
+    primary_metric = metric_names[0]
+
+    sampler = build_sampler(search_cfg, config.get("seed"))
+    study = create_study(search_cfg, sampler, direction_names)
+
+    stopping_cfg = config.get("stopping", {})
+    max_trials = int(stopping_cfg.get("max_trials", search_cfg["n_trials"]))
+    max_time_minutes = stopping_cfg.get("max_time_minutes")
+    patience_value = stopping_cfg.get("no_improve_patience")
+    cost_metric = stopping_cfg.get("cost_metric")
+    max_total_cost = stopping_cfg.get("max_total_cost")
     seed = config.get("seed")
 
     target_trials = int(search_cfg.get("n_trials", max_trials))
@@ -75,6 +89,10 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     best_value: float | None = None
     best_metrics: Dict[str, MetricValue] = {}
     best_params: Dict[str, Any] = {}
+    total_cost = 0.0 if cost_metric is not None else None
+
+    study_directions = study.directions
+    primary_direction = study_directions[0]
 
     with TrialLogger(
         log_file,
@@ -87,8 +105,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         meta_adjuster = create_meta_search_adjuster(
             config.get("meta_search"),
             config.get("llm"),
-            direction=study.direction,
-            metric_name=metric_name,
+            direction=primary_direction,
+            metric_name=primary_metric,
             search_space=search_space,
             seed=seed,
         )
@@ -116,29 +134,62 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
             params = sample_params(trial, search_space)
             metrics = evaluator(params, seed)
 
-            if metric_name not in metrics:
+            missing_metrics = [name for name in metric_names if name not in metrics]
+            if missing_metrics:
+                missing = ", ".join(missing_metrics)
                 raise RuntimeError(
-                    f"Evaluator did not return primary metric '{metric_name}'."
+                    f"Evaluator did not return required metrics: {missing}."
                 )
 
-            primary_value = float(metrics[metric_name])
-            study.tell(trial, primary_value)
+            objective_values = [float(metrics[name]) for name in metric_names]
+            primary_value = objective_values[0]
+
+            trial.set_user_attr("metrics", dict(metrics))
+            if len(objective_values) == 1:
+                study.tell(trial, primary_value)
+            else:
+                study.tell(trial, objective_values)
             trials_completed += 1
 
             writer.log(trial.number, params, metrics)
 
-            improved = update_best(
-                study.direction,
+            primary_improved = update_best(
+                primary_direction,
                 primary_value,
                 best_value,
             )
-            if improved:
+            pareto_improved = False
+            if len(objective_values) > 1:
+                pareto_improved = trial.number in {t.number for t in study.best_trials}
+            improved = primary_improved or pareto_improved
+
+            if primary_improved:
                 best_value = primary_value
                 best_metrics = dict(metrics)
                 best_params = dict(params)
+
+            if improved:
                 no_improve_counter = 0
             else:
                 no_improve_counter += 1
+
+            if cost_metric is not None:
+                cost_value = metrics.get(cost_metric)
+                if cost_value is None:
+                    raise RuntimeError(
+                        f"Evaluator did not return cost metric '{cost_metric}'."
+                    )
+                try:
+                    numeric_cost = float(cost_value)
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(
+                        f"Cost metric '{cost_metric}' must be numeric, got {cost_value!r}."
+                    ) from exc
+                assert total_cost is not None
+                total_cost += numeric_cost
+                if max_total_cost is not None and total_cost >= float(max_total_cost):
+                    early_stop_reason = "cost_budget_exhausted"
+                    break
 
             if meta_adjuster is not None:
                 adjustment = meta_adjuster.register_trial(
@@ -184,14 +235,34 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         raise RuntimeError("Optimization did not record any trials.")
 
     if best_value is None:
-        best_value = float(study.best_value)
+        if study.best_trials:
+            best_value = float(study.best_trials[0].values[0])
+        else:
+            candidates = [
+                float(trial.values[0])
+                for trial in study.get_trials(deepcopy=False)
+                if trial.values
+            ]
+            if candidates:
+                if primary_direction == optuna.study.StudyDirection.MINIMIZE:
+                    best_value = min(candidates)
+                else:
+                    best_value = max(candidates)
+            else:
+                best_value = float("nan")
 
-    build_report(
+    report_path, pareto_records, hypervolume = build_report(
         config,
         best_params,
         best_metrics,
         trials_completed,
         early_stop_reason,
+        metric_names=metric_names,
+        direction_names=direction_names,
+        study=study,
+        total_cost=total_cost,
+        cost_metric=cost_metric,
+        seed=seed,
     )
 
     return OptimizationResult(
@@ -200,7 +271,256 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         best_metrics=best_metrics,
         best_value=best_value,
         early_stopped_reason=early_stop_reason,
+        pareto_front=pareto_records,
+        hypervolume=hypervolume,
+        total_cost=total_cost,
     )
+
+
+def _normalise_objective_names(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        names = [str(item) for item in value]
+        if not names:
+            raise ValueError("search.metric must not be empty")
+        return names
+    raise TypeError("search.metric must be a string or sequence of strings")
+
+
+def _normalise_direction_names(value: Any, *, expected: int) -> List[str]:
+    if isinstance(value, str):
+        names = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        names = [str(item) for item in value]
+    else:
+        raise TypeError("search.direction must be a string or sequence of strings")
+
+    if not names:
+        raise ValueError("search.direction must not be empty")
+    normalised = [name.lower().strip() for name in names]
+    for name in normalised:
+        if name not in {"minimize", "maximize"}:
+            raise ValueError("search.direction entries must be 'minimize' or 'maximize'")
+
+    if len(normalised) == 1 and expected > 1:
+        normalised = normalised * expected
+
+    if len(normalised) != expected:
+        raise ValueError("search.metric and search.direction must have the same length")
+
+    return normalised
+
+
+def _prepare_pareto_outputs(
+    *,
+    study: optuna.study.Study,
+    metric_names: Sequence[str],
+    direction_names: Sequence[str],
+    report_dir: Path,
+    experiment_name: str,
+    seed: int | None,
+) -> Dict[str, Any] | None:
+    if len(metric_names) <= 1:
+        return None
+
+    pareto_trials = list(study.best_trials)
+    if not pareto_trials:
+        return None
+
+    records: List[Dict[str, Any]] = []
+    objective_count = len(metric_names)
+    for trial in pareto_trials:
+        if not trial.values or len(trial.values) < objective_count:
+            continue
+        values = {
+            metric: trial.values[idx]
+            for idx, metric in enumerate(metric_names)
+        }
+        record: Dict[str, Any] = {
+            "trial": trial.number,
+            "values": values,
+            "params": dict(trial.params),
+        }
+        metrics_attr = getattr(trial, "user_attrs", {})
+        metrics_payload = metrics_attr.get("metrics") if isinstance(metrics_attr, Mapping) else None
+        if isinstance(metrics_payload, Mapping):
+            record["metrics"] = dict(metrics_payload)
+        records.append(record)
+
+    if not records:
+        return None
+
+    records.sort(key=lambda item: item["trial"])
+
+    csv_path = report_dir / f"{experiment_name}_pareto.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = ["trial", *metric_names]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            row = {"trial": record["trial"]}
+            for metric in metric_names:
+                row[metric] = record["values"].get(metric)
+            writer.writerow(row)
+
+    scatter_path = _render_pareto_scatter(
+        records=records,
+        metric_names=metric_names,
+        direction_names=direction_names,
+        report_dir=report_dir,
+        experiment_name=experiment_name,
+    )
+
+    pareto_points = [
+        [record["values"][metric] for metric in metric_names]
+        for record in records
+    ]
+    all_points = _collect_objective_points(study, objective_count)
+    hypervolume = _approximate_hypervolume(
+        pareto_points=pareto_points,
+        all_points=all_points,
+        direction_names=direction_names,
+        seed=seed,
+    )
+
+    return {
+        "records": records,
+        "csv_path": csv_path,
+        "scatter_path": scatter_path,
+        "hypervolume": hypervolume,
+    }
+
+
+def _render_pareto_scatter(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    metric_names: Sequence[str],
+    direction_names: Sequence[str],
+    report_dir: Path,
+    experiment_name: str,
+) -> Path | None:
+    if len(metric_names) != 2:
+        return None
+    try:
+        import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    x_metric, y_metric = metric_names
+    x_values = [record["values"].get(x_metric) for record in records]
+    y_values = [record["values"].get(y_metric) for record in records]
+    if not x_values or not y_values:
+        return None
+
+    figure, axis = plt.subplots()
+    axis.scatter(x_values, y_values, c="tab:blue", s=60)
+    axis.set_xlabel(f"{x_metric} ({direction_names[0]})")
+    axis.set_ylabel(f"{y_metric} ({direction_names[1]})")
+    axis.set_title("Pareto Front")
+    axis.grid(True, linestyle="--", alpha=0.3)
+
+    path = report_dir / f"{experiment_name}_pareto.png"
+    figure.tight_layout()
+    figure.savefig(path, dpi=200)
+    plt.close(figure)
+    return path
+
+
+def _collect_objective_points(
+    study: optuna.study.Study,
+    objective_count: int,
+) -> List[List[float]]:
+    points: List[List[float]] = []
+    for trial in study.get_trials(deepcopy=False):
+        if not trial.values or len(trial.values) < objective_count:
+            continue
+        values = list(trial.values[:objective_count])
+        if not all(math.isfinite(value) for value in values):
+            continue
+        points.append(values)
+    return points
+
+
+def _approximate_hypervolume(
+    *,
+    pareto_points: Sequence[Sequence[float]],
+    all_points: Sequence[Sequence[float]],
+    direction_names: Sequence[str],
+    seed: int | None,
+    samples: int = 5000,
+) -> float | None:
+    if not pareto_points:
+        return None
+
+    transformed_pareto = [
+        _transform_objectives(point, direction_names)
+        for point in pareto_points
+    ]
+    transformed_all = [
+        _transform_objectives(point, direction_names)
+        for point in all_points
+    ]
+    if not transformed_all:
+        transformed_all = list(transformed_pareto)
+
+    dims = len(direction_names)
+    lower_bounds = [
+        min(point[idx] for point in transformed_pareto) for idx in range(dims)
+    ]
+    upper_bounds = [
+        max(point[idx] for point in transformed_all) for idx in range(dims)
+    ]
+
+    for idx in range(dims):
+        if not math.isfinite(lower_bounds[idx]) or not math.isfinite(upper_bounds[idx]):
+            return None
+        if math.isclose(lower_bounds[idx], upper_bounds[idx], rel_tol=1e-9, abs_tol=1e-9):
+            upper_bounds[idx] = lower_bounds[idx] + 1.0
+        margin = max(abs(upper_bounds[idx]) * 0.1, 1e-6)
+        upper_bounds[idx] += margin
+
+    rng = random.Random(seed)
+    dominated = 0
+    for _ in range(samples):
+        sample = [rng.uniform(lower_bounds[idx], upper_bounds[idx]) for idx in range(dims)]
+        for point in transformed_pareto:
+            if all(sample[idx] >= point[idx] for idx in range(dims)):
+                dominated += 1
+                break
+
+    volume = 1.0
+    for idx in range(dims):
+        span = upper_bounds[idx] - lower_bounds[idx]
+        if span <= 0:
+            return None
+        volume *= span
+
+    return volume * dominated / samples
+
+
+def _transform_objectives(
+    values: Sequence[float],
+    direction_names: Sequence[str],
+) -> List[float]:
+    return [
+        value if direction == "minimize" else -value
+        for value, direction in zip(values, direction_names)
+    ]
+
+
+def _format_metric_value(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(numeric):
+        return str(numeric)
+    if abs(numeric) >= 1e4 or (abs(numeric) > 0 and abs(numeric) < 1e-3):
+        return f"{numeric:.3e}"
+    return f"{numeric:.4f}".rstrip("0").rstrip(".")
 
 
 def ensure_directories(config: Mapping[str, Any]) -> None:
@@ -259,17 +579,48 @@ def build_sampler(search_cfg: Mapping[str, Any], seed: int | None) -> optuna.sam
         return optuna.samplers.TPESampler(seed=seed)
     if sampler_name == "random":
         return optuna.samplers.RandomSampler(seed=seed)
+    if sampler_name == "nsga2":
+        return optuna.samplers.NSGAIISampler(seed=seed)
+    if sampler_name == "nsgaiii":
+        return optuna.samplers.NSGAIIISampler(seed=seed)
+    if sampler_name == "motpe":
+        sampler_cls = getattr(optuna.samplers, "MOTPESampler", None)
+        if sampler_cls is None:
+            raise ValueError(
+                "Optuna installation does not provide MOTPESampler; upgrade Optuna to use 'motpe'."
+            )
+        return sampler_cls(seed=seed)  # type: ignore[call-arg]
+    if sampler_name == "moead":
+        sampler_cls = getattr(optuna.samplers, "MOEADSampler", None)
+        if sampler_cls is None:
+            raise ValueError(
+                "Optuna installation does not provide MOEADSampler; upgrade Optuna to use 'moead'."
+            )
+        return sampler_cls(seed=seed)  # type: ignore[call-arg]
+    if sampler_name == "mocma":
+        sampler_cls = getattr(optuna.samplers, "MOCMASampler", None)
+        if sampler_cls is None:
+            raise ValueError(
+                "Optuna installation does not provide MOCMASampler; upgrade Optuna to use 'mocma'."
+            )
+        return sampler_cls(seed=seed)  # type: ignore[call-arg]
     raise ValueError(f"Unsupported sampler: {sampler_name}")
 
 
-def create_study(search_cfg: Mapping[str, Any], sampler: optuna.samplers.BaseSampler) -> optuna.study.Study:
-    direction = search_cfg.get("direction", "minimize").lower()
-    if direction not in {"minimize", "maximize"}:
-        raise ValueError(f"Unsupported direction: {direction}")
-
+def create_study(
+    search_cfg: Mapping[str, Any],
+    sampler: optuna.samplers.BaseSampler,
+    direction_names: Sequence[str],
+) -> optuna.study.Study:
+    if len(direction_names) == 1:
+        return optuna.create_study(
+            study_name=search_cfg.get("study_name"),
+            direction=direction_names[0],
+            sampler=sampler,
+        )
     return optuna.create_study(
         study_name=search_cfg.get("study_name"),
-        direction=direction,
+        directions=list(direction_names),
         sampler=sampler,
     )
 
@@ -377,13 +728,23 @@ def build_report(
     best_metrics: Mapping[str, float],
     trials_completed: int,
     early_stop_reason: str | None,
-) -> Path:
+    *,
+    metric_names: Sequence[str],
+    direction_names: Sequence[str],
+    study: optuna.study.Study,
+    total_cost: float | None,
+    cost_metric: str | None,
+    seed: int | None,
+) -> tuple[Path, List[Dict[str, Any]] | None, float | None]:
     report_cfg = config.get("report", {})
     report_dir = Path(report_cfg.get("output_dir", "reports"))
     filename = report_cfg.get("filename") or f"{config['metadata']['name']}.md"
     report_path = report_dir / filename
     log_path = Path(config.get("artifacts", {}).get("log_file", "runs/log.csv"))
-    direction = str(config.get("search", {}).get("direction", "minimize")).lower()
+    objective_summary = ", ".join(
+        f"{metric} ({direction})"
+        for metric, direction in zip(metric_names, direction_names)
+    )
 
     lines: List[str] = [
         f"# Experiment Report — {config['metadata']['name']}",
@@ -391,7 +752,7 @@ def build_report(
         f"Description: {config['metadata'].get('description', '')}",
         "",
         f"Trials executed: {trials_completed}",
-        f"Primary metric: {config['search']['metric']}",
+        f"Objectives: {objective_summary}",
         "",
         "## Best Parameters",
     ]
@@ -399,14 +760,54 @@ def build_report(
     lines.append("")
     lines.append("## Best Metrics")
     lines.extend([f"- **{name}**: {value}" for name, value in best_metrics.items()])
+    if total_cost is not None and cost_metric is not None:
+        lines.extend(["", f"Total {cost_metric}: {_format_metric_value(total_cost)}"])
     if early_stop_reason:
         lines.extend(["", f"_Early stopping_: {early_stop_reason}"])
+
+    pareto_summary = _prepare_pareto_outputs(
+        study=study,
+        metric_names=metric_names,
+        direction_names=direction_names,
+        report_dir=report_dir,
+        experiment_name=config["metadata"]["name"],
+        seed=seed,
+    )
+
+    if pareto_summary is not None:
+        lines.extend(["", "## Pareto Front", ""])
+        header = "| Trial | " + " | ".join(metric_names) + " |"
+        separator = "|" + " --- |" * (len(metric_names) + 1)
+        lines.extend([header, separator])
+        for record in pareto_summary["records"]:
+            values = record["values"]
+            row = [str(record["trial"])]
+            row.extend(_format_metric_value(values.get(metric)) for metric in metric_names)
+            lines.append("| " + " | ".join(row) + " |")
+
+        lines.extend(
+            [
+                "",
+                f"Pareto CSV: `{pareto_summary['csv_path'].name}`",
+            ]
+        )
+        scatter_path = pareto_summary.get("scatter_path")
+        if scatter_path is not None:
+            lines.append(f"![Pareto scatter plot]({scatter_path.name})")
+        hypervolume = pareto_summary.get("hypervolume")
+        if hypervolume is not None:
+            lines.append("")
+            lines.append(
+                f"Approximate hypervolume: {_format_metric_value(hypervolume)}"
+            )
+    else:
+        hypervolume = None
 
     critic_section = generate_llm_critique(
         config=config,
         metadata=config.get("metadata", {}),
-        primary_metric=config["search"]["metric"],
-        direction=direction,
+        primary_metric=metric_names[0],
+        direction=direction_names[0],
         best_params=best_params,
         best_metrics=best_metrics,
         trials_completed=trials_completed,
@@ -418,4 +819,9 @@ def build_report(
         lines.extend(critic_section)
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
-    return report_path
+    pareto_records = (
+        [dict(record) for record in pareto_summary["records"]]
+        if pareto_summary is not None
+        else None
+    )
+    return report_path, pareto_records, hypervolume

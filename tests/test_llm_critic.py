@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import optuna
+
 from astraia.config import OptimizationConfig
 from astraia.optimization import build_report
 
@@ -71,12 +73,20 @@ class LLMCriticReportTests(unittest.TestCase):
 
             config = OptimizationConfig.model_validate(data).model_dump(mode="python")
 
-            report_path = build_report(
+            study = optuna.create_study(direction="minimize")
+
+            report_path, _, _ = build_report(
                 config,
                 best_params={"theta": 0.3},
                 best_metrics={"kl": 0.49},
                 trials_completed=4,
                 early_stop_reason=None,
+                metric_names=["kl"],
+                direction_names=["minimize"],
+                study=study,
+                total_cost=None,
+                cost_metric=None,
+                seed=123,
             )
 
             content = report_path.read_text(encoding="utf-8")
