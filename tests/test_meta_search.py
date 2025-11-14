@@ -17,7 +17,15 @@ class StubProvider:
     def __init__(self, payloads):
         self._payloads = deque(payloads)
 
-    def generate(self, prompt, *, temperature=None, json_mode=False, system=None):  # noqa: ANN001
+    def generate(
+        self,
+        prompt,
+        *,
+        temperature=None,
+        json_mode=False,
+        system=None,
+        tool=None,
+    ):  # noqa: ANN001
         if not self._payloads:
             raise RuntimeError("no payload queued")
         return LLMResult(content=self._payloads.popleft(), usage=None, raw_response=None)

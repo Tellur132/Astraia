@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
-from . import LLMResult, LLMUsage, Prompt, ProviderUnavailableError
+from . import LLMResult, LLMUsage, Prompt, ProviderUnavailableError, ToolDefinition
 
 try:  # pragma: no cover - optional dependency
     from openai import OpenAI  # type: ignore
@@ -40,6 +40,7 @@ class OpenAIProvider:
         json_mode: bool = False,
         system: str | None = None,
         stop: Sequence[str] | None = None,
+        tool: ToolDefinition | None = None,
     ) -> LLMResult:
         if OpenAI is None:  # pragma: no cover - environment dependent
             raise ProviderUnavailableError("openai package is not installed")
@@ -59,15 +60,30 @@ class OpenAIProvider:
                     "type": "json_object",
                 }
             }
+        if tool is not None:
+            response_kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+            ]
+            response_kwargs["tool_choice"] = {
+                "type": "tool",
+                "name": tool.name,
+            }
         if stop:
             response_kwargs["stop"] = list(stop)
 
         response = self._client.responses.create(**response_kwargs)
 
-        content = _extract_text(response)
+        content, tool_name = _extract_text(response, expected_tool=tool)
         usage = _extract_usage(response, provider="openai", model=self._model)
 
-        return LLMResult(content=content, usage=usage, raw_response=response)
+        return LLMResult(content=content, usage=usage, raw_response=response, tool_name=tool_name)
 
     def ping(self) -> None:
         """Issue a lightweight request to verify API connectivity."""
@@ -81,11 +97,16 @@ class OpenAIProvider:
             raise RuntimeError("OpenAI ping failed") from exc
 
 
-def _extract_text(response: Any) -> str:
+def _extract_text(response: Any, *, expected_tool: ToolDefinition | None) -> tuple[str, str | None]:
     """Best-effort extraction of text content from an OpenAI response."""
 
+    if expected_tool is not None:
+        arguments = _extract_tool_arguments(response, tool_name=expected_tool.name)
+        if arguments is not None:
+            return arguments, expected_tool.name
+
     if hasattr(response, "output_text") and response.output_text is not None:
-        return str(response.output_text)
+        return str(response.output_text), None
 
     output = getattr(response, "output", None)
     if isinstance(output, Sequence):
@@ -98,9 +119,50 @@ def _extract_text(response: Any) -> str:
                     if text:
                         pieces.append(str(text))
         if pieces:
-            return "".join(pieces)
+            return "".join(pieces), None
 
-    return ""
+    return "", None
+
+
+def _extract_tool_arguments(response: Any, *, tool_name: str) -> str | None:
+    output = getattr(response, "output", None)
+    if isinstance(output, Sequence):
+        for block in output:
+            content_items = getattr(block, "content", None)
+            if isinstance(content_items, Sequence):
+                for item in content_items:
+                    tool_calls = getattr(item, "tool_calls", None)
+                    if isinstance(tool_calls, Sequence):
+                        for call in tool_calls:
+                            function = getattr(call, "function", None)
+                            if function is None:
+                                continue
+                            name = getattr(function, "name", None)
+                            if name and str(name) != tool_name:
+                                continue
+                            arguments = getattr(function, "arguments", None)
+                            if arguments is not None:
+                                return str(arguments)
+    # Some SDK versions expose tool calls directly on the top level choices
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, Sequence):
+        for choice in choices:
+            message = getattr(choice, "message", None)
+            if message is None:
+                continue
+            tool_calls = getattr(message, "tool_calls", None)
+            if isinstance(tool_calls, Sequence):
+                for call in tool_calls:
+                    function = getattr(call, "function", None)
+                    if function is None:
+                        continue
+                    name = getattr(function, "name", None)
+                    if name and str(name) != tool_name:
+                        continue
+                    arguments = getattr(function, "arguments", None)
+                    if arguments is not None:
+                        return str(arguments)
+    return None
 
 
 def _extract_usage(response: Any, *, provider: str, model: str) -> LLMUsage | None:
