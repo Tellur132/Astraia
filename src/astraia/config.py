@@ -6,12 +6,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 try:  # pragma: no cover - use real pydantic when available
-    from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+    from pydantic import (
+        BaseModel,
+        ConfigDict,
+        ValidationError,
+        field_validator,
+        model_validator,
+    )
 except ImportError:  # pragma: no cover - offline fallback
     from ._compat.pydantic import (  # type: ignore[assignment]
         BaseModel,
         ConfigDict,
         ValidationError,
+        field_validator,
         model_validator,
     )
 
@@ -56,6 +63,8 @@ class SearchConfig(BaseModel):
             "nsgaiii",
             "moead",
             "mocma",
+            "nevergrad",
+            "de",
         }
         if self.sampler not in allowed_samplers:
             raise ValueError(
@@ -397,6 +406,7 @@ class MetaSearchConfig(BaseModel):
     enabled: bool = False
     interval: int = 10
     summary_trials: int = 10
+    policies: List["MetaPolicyConfig"] | None = None
 
     @model_validator(mode="after")
     def validate_fields(self) -> "MetaSearchConfig":
@@ -404,6 +414,166 @@ class MetaSearchConfig(BaseModel):
             raise ValueError("meta_search.interval must be a positive integer")
         if self.summary_trials <= 0:
             raise ValueError("meta_search.summary_trials must be a positive integer")
+        return self
+
+
+class PolicyMetricThreshold(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metric: str
+    value: float
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "PolicyMetricThreshold":
+        metric_name = self.metric.strip()
+        if not metric_name:
+            raise ValueError(
+                "meta_search.policies.metric must be a non-empty string when provided"
+            )
+        self.metric = metric_name
+        return self
+
+
+class PolicyConditionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    no_improve: int | None = None
+    metric_below: PolicyMetricThreshold | None = None
+    metric_above: PolicyMetricThreshold | None = None
+    sampler: List[str] | None = None
+    min_trials: int | None = None
+
+    @field_validator("sampler", mode="before")
+    @classmethod
+    def normalise_sampler(cls, value: Any) -> List[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [value]
+        if isinstance(value, list):
+            normalised: List[str] = []
+            for item in value:
+                if not isinstance(item, str) or not item.strip():
+                    raise ValueError(
+                        "meta_search.policies.when.sampler entries must be non-empty strings"
+                    )
+                normalised.append(item.strip().lower())
+            return normalised
+        raise TypeError(
+            "meta_search.policies.when.sampler must be a string or list of strings"
+        )
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "PolicyConditionConfig":
+        if self.no_improve is not None and self.no_improve <= 0:
+            raise ValueError("meta_search.policies.when.no_improve must be positive")
+        if self.min_trials is not None and self.min_trials < 0:
+            raise ValueError("meta_search.policies.when.min_trials must be non-negative")
+        if self.sampler is not None and not self.sampler:
+            raise ValueError("meta_search.policies.when.sampler must contain entries")
+        if not any(
+            [
+                self.no_improve is not None,
+                self.metric_below is not None,
+                self.metric_above is not None,
+                self.sampler,
+                self.min_trials is not None,
+            ]
+        ):
+            raise ValueError("meta_search.policies.when must define at least one condition")
+        return self
+
+
+class PolicyActionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sampler: str | None = None
+    rescale: Dict[str, float] | None = None
+    trial_budget: int | None = None
+    max_trials: int | None = None
+    patience: int | None = None
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "PolicyActionConfig":
+        if self.sampler is not None:
+            sampler_name = self.sampler.strip().lower()
+            if not sampler_name:
+                raise ValueError(
+                    "meta_search.policies.then.sampler must be a non-empty string when provided"
+                )
+            self.sampler = sampler_name
+        if self.rescale is not None:
+            cleaned: Dict[str, float] = {}
+            for name, value in self.rescale.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(
+                        "meta_search.policies.then.rescale keys must be non-empty strings"
+                    )
+                factor = float(value)
+                if not (0.05 <= factor <= 1.0):
+                    raise ValueError(
+                        "meta_search.policies.then.rescale values must be between 0.05 and 1.0"
+                    )
+                cleaned[name.strip()] = factor
+            self.rescale = cleaned
+        if self.trial_budget is not None and self.trial_budget <= 0:
+            raise ValueError(
+                "meta_search.policies.then.trial_budget must be positive when provided"
+            )
+        if self.max_trials is not None and self.max_trials <= 0:
+            raise ValueError(
+                "meta_search.policies.then.max_trials must be positive when provided"
+            )
+        if self.patience is not None and self.patience < 0:
+            raise ValueError(
+                "meta_search.policies.then.patience must be non-negative when provided"
+            )
+        if self.notes is not None:
+            note = self.notes.strip()
+            if not note:
+                raise ValueError(
+                    "meta_search.policies.then.notes must be a non-empty string when provided"
+                )
+            self.notes = note
+        if not any(
+            [
+                self.sampler is not None,
+                self.rescale,
+                self.trial_budget is not None,
+                self.max_trials is not None,
+                self.patience is not None,
+                self.notes is not None,
+            ]
+        ):
+            raise ValueError(
+                "meta_search.policies.then must define at least one adjustment directive"
+            )
+        return self
+
+
+class MetaPolicyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    when: PolicyConditionConfig
+    then: PolicyActionConfig
+    cooldown_trials: int = 0
+    trigger_once: bool = False
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "MetaPolicyConfig":
+        if self.name is not None:
+            name = self.name.strip()
+            if not name:
+                raise ValueError(
+                    "meta_search.policies.name must be a non-empty string when provided"
+                )
+            self.name = name
+        if self.cooldown_trials < 0:
+            raise ValueError(
+                "meta_search.policies.cooldown_trials must be non-negative"
+            )
         return self
 
 

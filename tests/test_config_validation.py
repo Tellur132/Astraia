@@ -155,6 +155,31 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         assert config.meta_search is not None
         self.assertTrue(config.meta_search.enabled)
 
+    def test_meta_search_policies_validation(self) -> None:
+        data = make_base_config()
+        data["meta_search"] = {
+            "enabled": True,
+            "interval": 4,
+            "summary_trials": 2,
+            "policies": [
+                {
+                    "name": "stagnation-switch",
+                    "when": {"no_improve": 2},
+                    "then": {"sampler": "nsga2"},
+                }
+            ],
+        }
+        config = OptimizationConfig.model_validate(data)
+        assert config.meta_search is not None
+        assert config.meta_search.policies is not None
+        self.assertEqual(len(config.meta_search.policies), 1)
+
+        data["meta_search"]["policies"] = [
+            {"when": {"no_improve": 1}, "then": {}},
+        ]
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
     def test_llm_critic_requires_llm_when_enabled(self) -> None:
         data = make_base_config()
         data["llm_critic"] = {"enabled": True}
