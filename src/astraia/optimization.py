@@ -13,6 +13,8 @@ import inspect
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
 
 import optuna
+from optuna.distributions import BaseDistribution, FloatDistribution
+from optuna.trial import TrialState
 
 from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
 from .llm_guidance import create_proposal_generator
@@ -320,7 +322,7 @@ def _prepare_pareto_outputs(
     report_dir: Path,
     experiment_name: str,
     seed: int | None,
-) -> Dict[str, Any] | None:
+    ) -> Dict[str, Any] | None:
     if len(metric_names) <= 1:
         return None
 
@@ -390,6 +392,95 @@ def _prepare_pareto_outputs(
         "scatter_path": scatter_path,
         "hypervolume": hypervolume,
     }
+
+
+class DifferentialEvolutionSampler(optuna.samplers.BaseSampler):
+    """Lightweight differential evolution sampler for continuous spaces."""
+
+    def __init__(
+        self,
+        *,
+        weight: float = 0.8,
+        crossover: float = 0.7,
+        seed: int | None = None,
+    ) -> None:
+        self._weight = float(weight)
+        self._crossover = float(crossover)
+        self._random = random.Random(seed)
+        self._fallback = optuna.samplers.RandomSampler(seed=seed)
+
+    def reseed_rng(self, seed: int | None) -> None:
+        self._random.seed(seed)
+        self._fallback.reseed_rng(seed)
+
+    def infer_relative_search_space(
+        self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial
+    ) -> Dict[str, BaseDistribution]:
+        return {}
+
+    def sample_relative(
+        self,
+        study: optuna.study.Study,
+        trial: optuna.trial.FrozenTrial,
+        search_space: Mapping[str, BaseDistribution],
+    ) -> Dict[str, float]:
+        return {}
+
+    def sample_independent(
+        self,
+        study: optuna.study.Study,
+        trial: optuna.trial.FrozenTrial,
+        param_name: str,
+        param_distribution: BaseDistribution,
+    ) -> float:
+        if not isinstance(param_distribution, FloatDistribution):
+            return self._fallback.sample_independent(
+                study, trial, param_name, param_distribution
+            )
+
+        population = self._collect_population(study, param_name)
+        if len(population) < 3:
+            return self._fallback.sample_independent(
+                study, trial, param_name, param_distribution
+            )
+
+        a, b, c = self._random.sample(population, 3)
+        base = a
+        candidate = base + self._weight * (b - c)
+        low = float(param_distribution.low)
+        high = float(param_distribution.high)
+
+        if not math.isfinite(candidate):
+            candidate = base
+
+        candidate = min(max(candidate, low), high)
+
+        if self._random.random() > self._crossover:
+            candidate = base
+
+        step = param_distribution.step
+        if step is not None and step > 0:
+            step_f = float(step)
+            candidate = round((candidate - low) / step_f) * step_f + low
+            candidate = min(max(candidate, low), high)
+
+        if param_distribution.log:
+            candidate = max(candidate, low)
+
+        return float(candidate)
+
+    def _collect_population(self, study: optuna.study.Study, param_name: str) -> List[float]:
+        trials = study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
+        population: List[float] = []
+        for trial in trials:
+            value = trial.params.get(param_name)
+            if value is None:
+                continue
+            try:
+                population.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return population
 
 
 def _render_pareto_scatter(
@@ -604,6 +695,19 @@ def build_sampler(search_cfg: Mapping[str, Any], seed: int | None) -> optuna.sam
                 "Optuna installation does not provide MOCMASampler; upgrade Optuna to use 'mocma'."
             )
         return sampler_cls(seed=seed)  # type: ignore[call-arg]
+    if sampler_name == "nevergrad":
+        try:
+            from optuna_integration.nevergrad import NevergradSampler  # type: ignore
+        except ImportError:
+            try:
+                from optuna.integration import NevergradSampler  # type: ignore
+            except (ImportError, AttributeError) as exc:  # pragma: no cover - optional dep
+                raise ValueError(
+                    "sampler 'nevergrad' requires optuna-integration[nevergrad] to be installed"
+                ) from exc
+        return NevergradSampler(seed=seed)
+    if sampler_name == "de":
+        return DifferentialEvolutionSampler(seed=seed)
     raise ValueError(f"Unsupported sampler: {sampler_name}")
 
 
