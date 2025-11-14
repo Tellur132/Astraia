@@ -1,0 +1,63 @@
+# configs/branin_2d.yaml
+metadata:
+  name: branin_2d_baseline
+  description: "2D Branin function classical baseline (known global minima)."
+
+seed: 42
+
+search:
+  # ここを変更: qgan_kl.yaml の search セクションと同じ構造に揃える
+  library: optuna         # qgan_kl.yaml で使っているライブラリに合わせる
+  metric: f               # evaluator が返すキー "f"
+  direction: minimize
+  sampler: tpe            # or random
+  n_trials: 400           # まずは 200 くらい試してみる
+
+stopping:
+  # ここを変更: qgan_kl.yaml の stopping セクションと同じ構造に揃える
+  max_trials: 400
+  max_time_minutes: null  # 時間制限なしなら null / 0 など、既存設定に合わせる
+  no_improve_patience: 200
+
+search_space:
+  # Branin の推奨探索領域 :contentReference[oaicite:6]{index=6}
+  x1:
+    type: float
+    low: -5.0
+    high: 10.0
+  x2:
+    type: float
+    low: 0.0
+    high: 15.0
+
+evaluator:
+  module: astraia.evaluators.branin  # ここを変更: ファイルパスに合わせる
+  callable: branin_objective         # ここを変更: 上で定義した関数名
+  # kwargs: は不要なので削除 or 何も書かない
+
+report:
+  # ここを変更: ファイル名・メトリクスは好みで
+  output_dir: reports
+  filename: branin_2d_baseline.md
+  metrics:
+    - f
+    - x1
+    - x2
+    - status
+    - elapsed_seconds
+
+artifacts:
+  log_file: runs/branin_2d_baseline/log.csv
+  run_root: runs/branin_2d_baseline
+
+planner:
+  backend: rule  
+
+llm_guidance:
+  enabled: false
+
+meta_search:
+  enabled: false
+
+llm_critic:
+  enabled: false
