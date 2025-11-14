@@ -12,6 +12,7 @@ __all__ = [
     "Prompt",
     "LLMUsage",
     "LLMResult",
+    "ToolDefinition",
     "ProviderUnavailableError",
     "LLMUsageLogger",
     "OpenAIProvider",
@@ -90,6 +91,16 @@ class LLMResult:
     content: str
     usage: LLMUsage | None = None
     raw_response: object | None = None
+    tool_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    """Definition of a structured tool/function call for an LLM."""
+
+    name: str
+    description: str
+    parameters: Mapping[str, Any]
 
 
 class ProviderUnavailableError(RuntimeError):

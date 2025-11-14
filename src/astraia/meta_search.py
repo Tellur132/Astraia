@@ -9,7 +9,7 @@ from typing import Any, Callable, Deque, Dict, Mapping, MutableMapping, Sequence
 import optuna
 
 from .llm_guidance import create_llm_provider
-from .llm_providers import LLMResult, Prompt, PromptMessage
+from .llm_providers import LLMResult, Prompt, PromptMessage, ToolDefinition
 
 
 @dataclass
@@ -143,13 +143,26 @@ class MetaSearchAdjuster:
         if self._provider is None:
             return None
 
-        prompt = self._build_prompt(best_value, best_params, trials_completed, settings)
+        schema = self._adjustment_schema(trials_completed, settings)
+        prompt = self._build_prompt(
+            best_value,
+            best_params,
+            trials_completed,
+            settings,
+            schema=schema,
+        )
+        tool = ToolDefinition(
+            name="meta_search_plan",
+            description="Return adjustments to the search strategy using the provided schema.",
+            parameters=schema,
+        )
         try:
             result = self._provider.generate(
                 prompt,
                 temperature=0.1,
-                json_mode=True,
+                json_mode=False,
                 system=self._SYSTEM_PROMPT,
+                tool=tool,
             )
         except Exception:
             return None
@@ -214,6 +227,8 @@ class MetaSearchAdjuster:
         best_params: Mapping[str, Any],
         trials_completed: int,
         settings: SearchSettings,
+        *,
+        schema: Mapping[str, Any],
     ) -> Prompt:
         summary = self._summarise_history(best_value, best_params, settings, trials_completed)
         example_payload = {
@@ -224,6 +239,7 @@ class MetaSearchAdjuster:
             "patience": settings.patience,
             "notes": "Focus on promising regions while keeping exploration.",
         }
+        schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
 
         lines = [
             "以下は最新の試行サマリです。",
@@ -235,12 +251,53 @@ class MetaSearchAdjuster:
             "必ず JSON オブジェクトのみを出力し、キーは sampler, rescale, trial_budget, max_trials, patience, notes を使用してください。",
             "rescale はパラメタ名をキー、0.05〜1.0 の縮小係数を値とするオブジェクトです。不要な場合は空オブジェクトにしてください。",
             "trial_budget は総試行数上限、max_trials は絶対上限、patience は改善なし許容回数を指定します。",
+            "応答は meta_search_plan 関数の引数として Schema に完全準拠する JSON のみを返してください。",
+            "Schema:",
+            schema_text,
             "例:",
             json.dumps(example_payload, ensure_ascii=False, indent=2),
         ]
 
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
+
+    def _adjustment_schema(
+        self, trials_completed: int, settings: SearchSettings
+    ) -> Dict[str, Any]:
+        minimum_trials = max(0, trials_completed)
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "sampler": {
+                    "type": "string",
+                    "enum": ["tpe", "random"],
+                },
+                "rescale": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "minimum": 0.05,
+                        "maximum": 1.0,
+                    },
+                },
+                "trial_budget": {
+                    "type": "integer",
+                    "minimum": minimum_trials,
+                },
+                "max_trials": {
+                    "type": "integer",
+                    "minimum": minimum_trials,
+                },
+                "patience": {
+                    "anyOf": [
+                        {"type": "integer", "minimum": 0},
+                        {"type": "null"},
+                    ]
+                },
+                "notes": {"type": "string"},
+            },
+        }
 
     def _summarise_history(
         self,
@@ -291,6 +348,17 @@ class MetaSearchAdjuster:
         except json.JSONDecodeError:
             return None
         if not isinstance(data, MutableMapping):
+            return None
+
+        allowed_keys = {
+            "sampler",
+            "rescale",
+            "trial_budget",
+            "max_trials",
+            "patience",
+            "notes",
+        }
+        if any(key not in allowed_keys for key in data.keys()):
             return None
 
         adjustment = MetaAdjustment()

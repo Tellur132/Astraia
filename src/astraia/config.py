@@ -306,6 +306,11 @@ class LLMConfig(BaseModel):
     provider: str
     model: str
     usage_log: str | None = None
+    max_calls: int | None = None
+    max_tokens_per_run: int | None = None
+    budget_usd: float | None = None
+    prompt_cost_per_1k: float | None = None
+    completion_cost_per_1k: float | None = None
 
     @model_validator(mode="after")
     def validate_strings(self) -> "LLMConfig":
@@ -318,6 +323,27 @@ class LLMConfig(BaseModel):
 
         if self.usage_log is not None and not self.usage_log.strip():
             raise ValueError("llm.usage_log must be a non-empty string when provided")
+
+        if self.max_calls is not None and self.max_calls <= 0:
+            raise ValueError("llm.max_calls must be positive when provided")
+        if self.max_tokens_per_run is not None and self.max_tokens_per_run <= 0:
+            raise ValueError("llm.max_tokens_per_run must be positive when provided")
+        if self.budget_usd is not None and self.budget_usd <= 0:
+            raise ValueError("llm.budget_usd must be positive when provided")
+        if self.prompt_cost_per_1k is not None and self.prompt_cost_per_1k <= 0:
+            raise ValueError("llm.prompt_cost_per_1k must be positive when provided")
+        if (
+            self.completion_cost_per_1k is not None
+            and self.completion_cost_per_1k <= 0
+        ):
+            raise ValueError(
+                "llm.completion_cost_per_1k must be positive when provided"
+            )
+        if self.budget_usd is not None:
+            if self.prompt_cost_per_1k is None or self.completion_cost_per_1k is None:
+                raise ValueError(
+                    "llm.prompt_cost_per_1k and llm.completion_cost_per_1k are required when budget_usd is set"
+                )
 
         return self
 
