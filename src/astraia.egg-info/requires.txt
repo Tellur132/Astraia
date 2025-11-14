@@ -1,0 +1,14 @@
+pyyaml>=6.0
+optuna>=3.6
+pydantic>=2.5
+matplotlib>=3.8
+
+[gemini]
+google-generativeai>=0.5
+
+[llm]
+openai>=1.0
+google-generativeai>=0.5
+
+[openai]
+openai>=1.0

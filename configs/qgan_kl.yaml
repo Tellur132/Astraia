@@ -17,17 +17,21 @@ planner:
   backend: rule
   role: planner
   prompt_template: planner_prompts/qgan_kl_minimal.txt
-  enabled: false
+  enabled: false    # LLMプランナー有効化フラグ
 llm_guidance:
-  enabled: false
+  enabled: true   # LLMガイダンス有効化フラグ
   problem_summary: qGAN KL 発散の最小実験
   objective: KL値を最小化するパラメタ探索
   n_proposals: 3
   max_retries: 2
   base_temperature: 0.7
   min_temperature: 0.2
+llm:
+  provider: openai
+  model: gpt-4.1-nano
+  usage_log: runs/qgan_kl_minimal/llm_usage.csv
 meta_search:
-  enabled: false
+  enabled: false    # メタサーチ有効化フラグ
   interval: 4
   summary_trials: 4
 search_space:

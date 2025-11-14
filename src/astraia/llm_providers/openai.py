@@ -54,7 +54,11 @@ class OpenAIProvider:
         if top_p is not None:
             response_kwargs["top_p"] = float(top_p)
         if json_mode:
-            response_kwargs["response_format"] = {"type": "json_object"}
+            response_kwargs["text"] = {
+                "format": {
+                    "type": "json_object",
+                }
+            }
         if stop:
             response_kwargs["stop"] = list(stop)
 
@@ -107,7 +111,8 @@ def _extract_usage(response: Any, *, provider: str, model: str) -> LLMUsage | No
     prompt_tokens = getattr(usage, "input_tokens", None)
     completion_tokens = getattr(usage, "output_tokens", None)
     total_tokens = getattr(usage, "total_tokens", None)
-    request_id = getattr(response, "id", None) or getattr(response, "response_id", None)
+    request_id = getattr(response, "id", None) or getattr(
+        response, "response_id", None)
 
     return LLMUsage(
         provider=provider,
