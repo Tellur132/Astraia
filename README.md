@@ -89,6 +89,8 @@ python -m astraia.cli --config configs/qgan_kl.yaml --planner llm \
 - 全ての評価器は `BaseEvaluator` (`src/astraia/evaluators/base.py`) を継承するか、互換の `evaluate(params, seed)` を提供するファクトリから生成します。
 - qGAN KL 用の最小実装は `QGANKLEvaluator` (`src/astraia/evaluators/qgan_kl.py`) として提供され、YAML で `evaluator.callable: create_evaluator` を指定するとインスタンス化されます。
 - 評価結果の辞書には主指標 (`kl`) とレポート対象メトリクス（例: `depth`, `params`, `shots`）を含めます。Optuna への報告値は `search.metric` で指定したキーの値になります。
+- `BaseEvaluator.evaluate` は `trial_timeout_sec` / `max_retries` / `graceful_nan_policy` を受け取り、例外・NaN/Inf・タイムアウト発生時も構造化されたペイロードで復帰します。
+- `BaseEvaluator` は Pydantic で I/O スキーマを検証し、Python 標準乱数・NumPy・PyTorch のシードを一貫して初期化したうえで一時ディレクトリ内で評価を実行します。
 
 ## LLM 機能
 
