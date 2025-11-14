@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .base import BaseEvaluator, EvaluatorResult
+from .base import BaseEvaluator, EvaluatorResult, GracefulNaNPolicy
 
 
 @dataclass(slots=True)
@@ -128,6 +128,10 @@ class QGANKLEvaluator(BaseEvaluator):
             "terminated_early": False,
             "elapsed_seconds": elapsed,
         }
+
+    @property
+    def graceful_nan_policy(self) -> GracefulNaNPolicy:
+        return GracefulNaNPolicy.MARK_FAILURE
 
 
 def create_evaluator(config: Mapping[str, Any]) -> QGANKLEvaluator:
