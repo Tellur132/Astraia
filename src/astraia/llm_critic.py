@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import csv
+import json
 import math
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping
 
 from .llm_guidance import create_llm_provider
-from .llm_providers import Prompt
+from .llm_providers import Prompt, ToolDefinition
 
 
 _SYSTEM_PROMPT = (
@@ -64,6 +65,7 @@ def generate_llm_critique(
     if provider is None:
         return fallback
 
+    schema = _critique_schema()
     prompt = _build_prompt(
         metadata=metadata,
         primary_metric=primary_metric,
@@ -75,6 +77,7 @@ def generate_llm_critique(
         signals=signals,
         series=series,
         prompt_preamble=prompt_preamble,
+        schema=schema,
     )
 
     try:
@@ -82,6 +85,12 @@ def generate_llm_critique(
             prompt,
             temperature=0.2,
             system=_SYSTEM_PROMPT,
+            json_mode=False,
+            tool=ToolDefinition(
+                name="render_diagnostic_report",
+                description="Summarise failure diagnosis and actionable recommendations.",
+                parameters=schema,
+            ),
         )
     except Exception:
         return fallback
@@ -89,11 +98,12 @@ def generate_llm_critique(
     if usage_logger is not None:
         usage_logger.log(result.usage)
 
-    content = result.content.strip()
-    if not content:
+    parsed = _parse_structured_critique(result.content)
+    if parsed is None:
         return fallback
 
-    return [line.rstrip() for line in content.splitlines()]
+    diagnosis, recommendations = parsed
+    return _format_structured_sections(diagnosis, recommendations)
 
 
 def _load_metric_history(path: Path, metric_name: str, *, limit: int) -> List[float]:
@@ -244,6 +254,67 @@ def _build_suggestions(signals: FailureSignals) -> List[str]:
     return suggestions
 
 
+def _critique_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "diagnosis": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+            },
+            "recommendations": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+            },
+        },
+        "required": ["diagnosis", "recommendations"],
+    }
+
+
+def _parse_structured_critique(payload: str) -> tuple[List[str], List[str]] | None:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    allowed = {"diagnosis", "recommendations"}
+    if any(key not in allowed for key in data.keys()):
+        return None
+
+    diagnosis = _normalise_string_list(data.get("diagnosis"))
+    recommendations = _normalise_string_list(data.get("recommendations"))
+    if not diagnosis or not recommendations:
+        return None
+    return diagnosis, recommendations
+
+
+def _normalise_string_list(value: Any) -> List[str]:
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+        return []
+    results: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            results.append(text)
+    return results
+
+
+def _format_structured_sections(
+    diagnosis: List[str], recommendations: List[str]
+) -> List[str]:
+    lines: List[str] = ["### 失敗ケース診断", ""]
+    lines.extend(f"- {item}" for item in diagnosis)
+    lines.extend(["", "### 改善提案", ""])
+    lines.extend(f"- {item}" for item in recommendations)
+    return lines
+
+
 def _build_prompt(
     *,
     metadata: Mapping[str, Any],
@@ -256,6 +327,7 @@ def _build_prompt(
     signals: FailureSignals,
     series: List[float],
     prompt_preamble: str | None,
+    schema: Mapping[str, Any],
 ) -> Prompt:
     name = metadata.get("name", "unknown")
     description = metadata.get("description", "")
@@ -283,6 +355,8 @@ def _build_prompt(
 
     preamble = f"{prompt_preamble}\n" if prompt_preamble else ""
 
+    schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
+
     text = (
         f"{preamble}実験名: {name}\n"
         f"説明: {description}\n"
@@ -299,7 +373,9 @@ def _build_prompt(
         "要求:\n"
         "- 失敗ケース診断ではNaN頻発や勾配爆発、収束停滞などの要因を特定すること。\n"
         "- 改善提案では制約・前処理・ノイズモデルの観点で具体的なアクションを列挙すること。\n"
-        "- Markdownの見出しは『失敗ケース診断』『改善提案』を使用すること。"
+        "- 応答は render_diagnostic_report 関数の引数として Schema に従う JSON オブジェクトのみを返すこと。\n"
+        "Schema:\n"
+        + schema_text
     )
 
     return Prompt.from_text(text)

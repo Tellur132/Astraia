@@ -2,21 +2,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
 import random
-from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 import warnings
 
 from .llm_providers import (
     LLMResult,
+    LLMUsage,
     LLMUsageLogger,
     Prompt,
     PromptMessage,
     ProviderUnavailableError,
     GeminiProvider,
     OpenAIProvider,
+    ToolDefinition,
 )
 
 
@@ -72,7 +75,149 @@ def create_llm_provider(
         )
         provider = None
 
+    if provider is None:
+        return None, usage_logger
+
+    guard = _build_budget_guard(llm_cfg)
+    if guard is not None and guard.has_limits:
+        provider = _BudgetedProvider(provider, guard)
+
     return provider, usage_logger
+
+
+class LLMBudgetGuard:
+    """Track aggregate usage and enforce coarse runtime limits."""
+
+    def __init__(
+        self,
+        *,
+        max_calls: int | None,
+        max_tokens: int | None,
+        budget_usd: float | None,
+        prompt_cost_per_1k: float | None,
+        completion_cost_per_1k: float | None,
+    ) -> None:
+        self._max_calls = max_calls if max_calls and max_calls > 0 else None
+        self._max_tokens = max_tokens if max_tokens and max_tokens > 0 else None
+        self._budget_usd = budget_usd if budget_usd and budget_usd > 0 else None
+        self._prompt_cost = (
+            prompt_cost_per_1k if prompt_cost_per_1k and prompt_cost_per_1k > 0 else None
+        )
+        self._completion_cost = (
+            completion_cost_per_1k
+            if completion_cost_per_1k and completion_cost_per_1k > 0
+            else None
+        )
+
+        self._calls_made = 0
+        self._tokens_used = 0
+        self._budget_spent = 0.0
+        self._exhausted = False
+        self._exhaustion_reason: str | None = None
+
+    @property
+    def has_limits(self) -> bool:
+        return any(
+            value is not None
+            for value in (self._max_calls, self._max_tokens, self._budget_usd)
+        )
+
+    def start_call(self) -> None:
+        if not self.has_limits:
+            return
+        if self._exhausted:
+            raise RuntimeError(self._exhaustion_reason or "LLM budget exhausted")
+        if self._max_calls is not None and self._calls_made >= self._max_calls:
+            self._exhausted = True
+            self._exhaustion_reason = "LLM call limit reached"
+            raise RuntimeError(self._exhaustion_reason)
+        self._calls_made += 1
+
+    def cancel_call(self) -> None:
+        if not self.has_limits:
+            return
+        if self._calls_made > 0:
+            self._calls_made -= 1
+
+    def finalize_call(self, usage: LLMUsage | None) -> None:
+        if not self.has_limits:
+            return
+
+        if usage is not None:
+            prompt_tokens = usage.prompt_tokens or 0
+            completion_tokens = usage.completion_tokens or 0
+            total_tokens = usage.total_tokens
+            if total_tokens is None:
+                total_tokens = prompt_tokens + completion_tokens
+            if total_tokens:
+                self._tokens_used += int(total_tokens)
+            if self._budget_usd is not None:
+                cost = 0.0
+                if self._prompt_cost is not None and prompt_tokens:
+                    cost += (prompt_tokens / 1000.0) * self._prompt_cost
+                if self._completion_cost is not None and completion_tokens:
+                    cost += (completion_tokens / 1000.0) * self._completion_cost
+                self._budget_spent += cost
+
+        self._check_exhaustion()
+
+    def _check_exhaustion(self) -> None:
+        if self._max_tokens is not None and self._tokens_used >= self._max_tokens:
+            self._exhausted = True
+            if self._exhaustion_reason is None:
+                self._exhaustion_reason = "LLM token budget exhausted"
+        if (
+            self._budget_usd is not None
+            and self._prompt_cost is not None
+            and self._completion_cost is not None
+            and self._budget_spent >= self._budget_usd
+        ):
+            self._exhausted = True
+            if self._exhaustion_reason is None:
+                self._exhaustion_reason = "LLM cost budget exhausted"
+
+
+class _BudgetedProvider:
+    """Proxy provider that enforces :class:`LLMBudgetGuard` limits."""
+
+    def __init__(self, provider: Any, guard: LLMBudgetGuard) -> None:
+        self._provider = provider
+        self._guard = guard
+
+    def generate(self, prompt: Prompt, *, tool: ToolDefinition | None = None, **kwargs: Any) -> LLMResult:
+        self._guard.start_call()
+        try:
+            result = self._provider.generate(prompt, tool=tool, **kwargs)
+        except Exception:
+            self._guard.cancel_call()
+            raise
+        self._guard.finalize_call(result.usage)
+        return result
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - passthrough
+        return getattr(self._provider, name)
+
+
+def _build_budget_guard(cfg: Mapping[str, Any]) -> LLMBudgetGuard | None:
+    max_calls = cfg.get("max_calls")
+    max_tokens = cfg.get("max_tokens_per_run")
+    budget = cfg.get("budget_usd")
+    prompt_cost = cfg.get("prompt_cost_per_1k")
+    completion_cost = cfg.get("completion_cost_per_1k")
+
+    guard = LLMBudgetGuard(
+        max_calls=int(max_calls) if isinstance(max_calls, (int, float)) else None,
+        max_tokens=int(max_tokens) if isinstance(max_tokens, (int, float)) else None,
+        budget_usd=float(budget) if isinstance(budget, (int, float)) else None,
+        prompt_cost_per_1k=float(prompt_cost)
+        if isinstance(prompt_cost, (int, float))
+        else None,
+        completion_cost_per_1k=float(completion_cost)
+        if isinstance(completion_cost, (int, float))
+        else None,
+    )
+
+    return guard if guard.has_limits else None
 
 
 @dataclass
@@ -128,6 +273,9 @@ class LLMProposalGenerator:
         self._usage_logger = usage_logger
         self._cache = cache
         self._rng = random.Random(seed)
+        self._schema_cache: dict[int, Dict[str, Any]] = {}
+        self._tool_cache: dict[int, ToolDefinition] = {}
+        self._seen_hashes: set[str] = set()
 
     @property
     def batch_size(self) -> int:
@@ -143,36 +291,44 @@ class LLMProposalGenerator:
             count = min(self._batch_size, remaining)
 
         if self._provider is None:
-            return [self._random_proposal() for _ in range(count)]
+            return self._random_unique_batch(count)
 
         cache_key = self._cache_key(count)
         cached = self._cache.get(cache_key)
         if cached is not None:
-            return cached
+            unique = self._ensure_unique_batch(cached, expected=count)
+            if unique is not None:
+                return unique
 
         prompt = self._build_prompt(count)
         temperature = self._base_temperature
         attempts = 0
 
         while attempts <= self._max_retries:
-            result = self._provider.generate(
-                prompt,
-                temperature=temperature,
-                json_mode=True,
-                system=self._SYSTEM_PROMPT,
-            )
+            tool = self._proposal_tool(count)
+            try:
+                result = self._provider.generate(
+                    prompt,
+                    temperature=temperature,
+                    json_mode=False,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                )
+            except RuntimeError:
+                break
             self._log_usage(result)
             proposals = self._parse_and_validate(result, expected=count)
             if proposals is not None:
-                self._cache.set(cache_key, proposals)
-                return proposals
+                unique = self._ensure_unique_batch(proposals, expected=count)
+                if unique is not None:
+                    self._cache.set(cache_key, unique)
+                    return unique
             attempts += 1
             if attempts > self._max_retries:
                 break
             temperature = max(self._min_temperature, temperature * 0.5)
 
-        proposals = [self._random_proposal() for _ in range(count)]
-        return proposals
+        return self._random_unique_batch(count)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -205,6 +361,8 @@ class LLMProposalGenerator:
             ]
         }
 
+        schema = json.dumps(self._proposal_schema(count), ensure_ascii=False, indent=2)
+
         instructions = (
             f"候補は必ず {count} 件。" "JSON オブジェクト {\"proposals\"} に配列で返すこと。"
             "各パラメタはキーに対応する数値/文字列のみを含め、追加情報を含めないこと。"
@@ -215,12 +373,83 @@ class LLMProposalGenerator:
             "",
             instructions,
             "",
+            "戻り値は propose_candidates 関数の引数として Schema に完全一致する JSON オブジェクト1件のみを出力すること。",
+            "Schema:",
+            schema,
+            "",
             "出力例 (構造のみ、値はサンプル):",
             json.dumps(example, ensure_ascii=False, indent=2),
         ])
 
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
+
+    def _proposal_tool(self, count: int) -> ToolDefinition:
+        tool = self._tool_cache.get(count)
+        if tool is None:
+            schema = self._proposal_schema(count)
+            tool = ToolDefinition(
+                name="propose_candidates",
+                description="Return hyper-parameter proposals that satisfy the schema.",
+                parameters=schema,
+            )
+            self._tool_cache[count] = tool
+        return tool
+
+    def _proposal_schema(self, count: int) -> Dict[str, Any]:
+        schema = self._schema_cache.get(count)
+        if schema is not None:
+            return schema
+
+        param_properties: Dict[str, Any] = {}
+        required: List[str] = []
+        for name, spec in self._search_space.items():
+            param_properties[name] = self._parameter_schema(spec)
+            required.append(name)
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "proposals": {
+                    "type": "array",
+                    "minItems": count,
+                    "maxItems": count,
+                    "items": {
+                        "type": "object",
+                        "properties": param_properties,
+                        "required": required,
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["proposals"],
+        }
+        self._schema_cache[count] = schema
+        return schema
+
+    def _parameter_schema(self, spec: Mapping[str, Any]) -> Dict[str, Any]:
+        param_type = spec.get("type")
+        if param_type == "float":
+            low = float(spec.get("low"))
+            high = float(spec.get("high"))
+            schema: Dict[str, Any] = {"type": "number", "minimum": low, "maximum": high}
+            step = spec.get("step")
+            if step is not None:
+                schema["multipleOf"] = float(step)
+            return schema
+        if param_type == "int":
+            low = int(spec.get("low"))
+            high = int(spec.get("high"))
+            schema = {"type": "integer", "minimum": low, "maximum": high}
+            step = spec.get("step")
+            if step is not None:
+                schema["multipleOf"] = max(1, int(step))
+            return schema
+        if param_type == "categorical":
+            choices = list(spec.get("choices", []))
+            return {"enum": choices}
+        return {}
 
     def _describe_parameter(self, name: str, spec: Mapping[str, Any]) -> str:
         param_type = spec.get("type", "")
@@ -414,6 +643,53 @@ class LLMProposalGenerator:
         if not choices:
             raise ValueError("categorical parameter requires choices")
         return self._rng.choice(choices)
+
+    def _ensure_unique_batch(
+        self, proposals: Iterable[Mapping[str, Any]], *, expected: int
+    ) -> List[Dict[str, Any]] | None:
+        unique: List[Dict[str, Any]] = []
+        for proposal in proposals:
+            proposal_dict = dict(proposal)
+            if self._register_proposal(proposal_dict):
+                unique.append(proposal_dict)
+            if len(unique) >= expected:
+                return unique[:expected]
+
+        needed = expected - len(unique)
+        if needed <= 0:
+            return unique[:expected]
+
+        filler = self._random_unique_batch(needed)
+        unique.extend(filler[:needed])
+        if len(unique) >= expected:
+            return unique[:expected]
+        return None
+
+    def _random_unique_batch(self, count: int) -> List[Dict[str, Any]]:
+        proposals: List[Dict[str, Any]] = []
+        attempts = 0
+        attempt_limit = max(50, count * 20)
+        while len(proposals) < count and attempts < attempt_limit:
+            candidate = self._random_proposal()
+            attempts += 1
+            if self._register_proposal(candidate):
+                proposals.append(candidate)
+        if len(proposals) < count:
+            while len(proposals) < count:
+                candidate = self._random_proposal()
+                proposals.append(candidate)
+        return proposals
+
+    def _register_proposal(self, proposal: Mapping[str, Any]) -> bool:
+        fingerprint = self._hash_proposal(proposal)
+        if fingerprint in self._seen_hashes:
+            return False
+        self._seen_hashes.add(fingerprint)
+        return True
+
+    def _hash_proposal(self, proposal: Mapping[str, Any]) -> str:
+        canonical = json.dumps(dict(proposal), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 _PROMPT_CACHE = PromptCache()

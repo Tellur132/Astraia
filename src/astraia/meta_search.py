@@ -4,12 +4,37 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import json
-from typing import Any, Callable, Deque, Dict, Mapping, MutableMapping, Sequence
+from typing import (
+    Any,
+    Callable,
+    Deque,
+    Dict,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import optuna
 
 from .llm_guidance import create_llm_provider
-from .llm_providers import LLMResult, Prompt, PromptMessage
+from .llm_providers import LLMResult, Prompt, PromptMessage, ToolDefinition
+
+
+_SUPPORTED_META_SAMPLERS = {
+    "tpe",
+    "random",
+    "nsga2",
+    "nsgaiii",
+    "motpe",
+    "moead",
+    "mocma",
+    "nevergrad",
+    "de",
+}
 
 
 @dataclass
@@ -46,6 +71,59 @@ class MetaAdjustment:
     source: str = "heuristic"
 
 
+@dataclass
+class PolicyCondition:
+    """Declarative condition describing when to trigger a policy."""
+
+    no_improve: int | None = None
+    metric_below: Tuple[str, float] | None = None
+    metric_above: Tuple[str, float] | None = None
+    samplers: Set[str] | None = None
+    min_trials: int | None = None
+
+
+@dataclass
+class PolicyRule:
+    """Declarative policy describing when and how to adjust the search."""
+
+    name: str | None
+    condition: PolicyCondition
+    sampler: str | None
+    rescale: Dict[str, float]
+    trial_budget: int | None
+    max_trials: int | None
+    patience: int | None
+    notes: str | None
+    cooldown_trials: int
+    trigger_once: bool
+    last_triggered: Optional[int] = None
+
+    def can_trigger(self, *, current_trial: int) -> bool:
+        if self.trigger_once and self.last_triggered is not None:
+            return False
+        if self.cooldown_trials > 0 and self.last_triggered is not None:
+            if current_trial - self.last_triggered < self.cooldown_trials:
+                return False
+        return True
+
+    def record_trigger(self, *, current_trial: int) -> None:
+        self.last_triggered = current_trial
+
+    def make_adjustment(self) -> MetaAdjustment:
+        notes = self.notes
+        if not notes and self.name:
+            notes = self.name
+        return MetaAdjustment(
+            sampler=self.sampler,
+            rescale=dict(self.rescale),
+            trial_budget=self.trial_budget,
+            max_trials=self.max_trials,
+            patience=self.patience,
+            notes=notes,
+            source="policy",
+        )
+
+
 class MetaSearchAdjuster:
     """Periodically summarise progress and request strategy updates."""
 
@@ -65,6 +143,7 @@ class MetaSearchAdjuster:
         search_space: Mapping[str, Mapping[str, Any]],
         llm_cfg: Mapping[str, Any] | None,
         seed: int | None,
+        policies: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         if interval <= 0:
             raise ValueError("interval must be positive")
@@ -77,9 +156,11 @@ class MetaSearchAdjuster:
         self._since_last = 0
         self._direction = direction
         self._metric_name = metric_name
+        self._metric_name_lc = metric_name.lower()
         self._search_space = {name: dict(spec) for name, spec in search_space.items()}
         self._provider, self._usage_logger = create_llm_provider(llm_cfg)
         self._seed = seed
+        self._policies = self._build_policies(policies or [])
 
     def register_trial(
         self,
@@ -91,8 +172,8 @@ class MetaSearchAdjuster:
         metrics: Mapping[str, Any],
         best_value: float | None,
         best_params: Mapping[str, Any],
-        trials_completed: int,
-        settings: SearchSettings,
+            trials_completed: int,
+            settings: SearchSettings,
     ) -> MetaAdjustment | None:
         """Record the latest trial and, if due, return an adjustment suggestion."""
 
@@ -111,6 +192,15 @@ class MetaSearchAdjuster:
             return None
 
         self._since_last = 0
+
+        policy_adjustment = self._evaluate_policies(
+            best_value=best_value,
+            trials_completed=trials_completed,
+            settings=settings,
+            latest_metrics=metrics,
+        )
+        if policy_adjustment is not None:
+            return policy_adjustment
 
         if self._provider is not None:
             adjustment = self._request_plan_from_llm(
@@ -132,6 +222,230 @@ class MetaSearchAdjuster:
     # ------------------------------------------------------------------
     # Plan generation helpers
     # ------------------------------------------------------------------
+    def _build_policies(self, policies: Sequence[Mapping[str, Any]]) -> List[PolicyRule]:
+        rules: List[PolicyRule] = []
+        for idx, payload in enumerate(policies):
+            try:
+                rule = self._parse_policy(payload, index=idx)
+            except Exception:
+                continue
+            if rule is not None:
+                rules.append(rule)
+        return rules
+
+    def _parse_policy(
+        self, payload: Mapping[str, Any], *, index: int
+    ) -> PolicyRule | None:
+        when = payload.get("when")
+        then = payload.get("then")
+        if not isinstance(when, Mapping) or not isinstance(then, Mapping):
+            return None
+
+        no_improve = self._coerce_int(when.get("no_improve"))
+        metric_below = self._parse_metric_condition(when.get("metric_below"))
+        metric_above = self._parse_metric_condition(when.get("metric_above"))
+        samplers = self._parse_sampler_set(when.get("sampler"))
+        min_trials = self._coerce_int(when.get("min_trials"))
+
+        condition = PolicyCondition(
+            no_improve=no_improve,
+            metric_below=metric_below,
+            metric_above=metric_above,
+            samplers=samplers,
+            min_trials=min_trials,
+        )
+
+        rescale_payload = then.get("rescale") if isinstance(then.get("rescale"), Mapping) else None
+        rescale = {str(k): float(v) for k, v in (rescale_payload or {}).items()}
+        sampler = then.get("sampler")
+        sampler_name = str(sampler).lower() if isinstance(sampler, str) else None
+        if sampler_name is not None and sampler_name not in _SUPPORTED_META_SAMPLERS:
+            sampler_name = None
+
+        trial_budget = self._coerce_int(then.get("trial_budget"))
+        max_trials = self._coerce_int(then.get("max_trials"))
+        patience = self._coerce_int(then.get("patience"))
+        notes = then.get("notes")
+        note_text = str(notes).strip() if isinstance(notes, str) else None
+        if note_text == "":
+            note_text = None
+
+        cooldown = self._coerce_int(payload.get("cooldown_trials")) or 0
+        trigger_once = bool(payload.get("trigger_once", False))
+        name = payload.get("name")
+        name_text = str(name).strip() if isinstance(name, str) and name.strip() else None
+
+        return PolicyRule(
+            name=name_text,
+            condition=condition,
+            sampler=sampler_name,
+            rescale=rescale,
+            trial_budget=trial_budget,
+            max_trials=max_trials,
+            patience=patience,
+            notes=note_text,
+            cooldown_trials=max(0, cooldown),
+            trigger_once=trigger_once,
+        )
+
+    def _parse_metric_condition(
+        self, payload: Mapping[str, Any] | None
+    ) -> Tuple[str, float] | None:
+        if not isinstance(payload, Mapping):
+            return None
+        metric = payload.get("metric")
+        if not isinstance(metric, str) or not metric.strip():
+            return None
+        try:
+            value = float(payload.get("value"))
+        except (TypeError, ValueError):
+            return None
+        return (metric.strip().lower(), value)
+
+    def _parse_sampler_set(self, payload: Any) -> Set[str] | None:
+        if payload is None:
+            return None
+        samplers: Set[str] = set()
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+            for item in payload:
+                if isinstance(item, str) and item.strip():
+                    sampler_name = item.strip().lower()
+                    if sampler_name in _SUPPORTED_META_SAMPLERS:
+                        samplers.add(sampler_name)
+        elif isinstance(payload, str) and payload.strip():
+            sampler_name = payload.strip().lower()
+            if sampler_name in _SUPPORTED_META_SAMPLERS:
+                samplers.add(sampler_name)
+        return samplers or None
+
+    def _coerce_int(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _evaluate_policies(
+        self,
+        *,
+        best_value: float | None,
+        trials_completed: int,
+        settings: SearchSettings,
+        latest_metrics: Mapping[str, Any],
+    ) -> MetaAdjustment | None:
+        if not self._policies:
+            return None
+
+        streak = self._count_no_improve()
+        metric_summary = self._collect_metric_summary()
+        latest_numeric = self._normalise_metrics(latest_metrics)
+
+        for rule in self._policies:
+            if not rule.can_trigger(current_trial=trials_completed):
+                continue
+
+            cond = rule.condition
+            if cond.min_trials is not None and trials_completed < cond.min_trials:
+                continue
+            if cond.no_improve is not None and streak < cond.no_improve:
+                continue
+            if cond.samplers and settings.sampler not in cond.samplers:
+                continue
+
+            if cond.metric_below is not None:
+                metric_name, threshold = cond.metric_below
+                value = self._resolve_metric_value(
+                    metric_name,
+                    metric_summary,
+                    latest_numeric,
+                    best_value=best_value,
+                    prefer="min",
+                )
+                if value is None or value >= threshold:
+                    continue
+
+            if cond.metric_above is not None:
+                metric_name, threshold = cond.metric_above
+                value = self._resolve_metric_value(
+                    metric_name,
+                    metric_summary,
+                    latest_numeric,
+                    best_value=best_value,
+                    prefer="max",
+                )
+                if value is None or value <= threshold:
+                    continue
+
+            rule.record_trigger(current_trial=trials_completed)
+            return rule.make_adjustment()
+
+        return None
+
+    def _count_no_improve(self) -> int:
+        streak = 0
+        for record in reversed(self._history):
+            if record.improved:
+                break
+            streak += 1
+        return streak
+
+    def _collect_metric_summary(self) -> Dict[str, Dict[str, float]]:
+        summary: Dict[str, Dict[str, float]] = {}
+        for record in self._history:
+            for name, value in record.metrics.items():
+                if not isinstance(name, str):
+                    continue
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                key = name.lower()
+                stats = summary.setdefault(
+                    key, {"latest": numeric, "min": numeric, "max": numeric}
+                )
+                stats["latest"] = numeric
+                stats["min"] = min(stats["min"], numeric)
+                stats["max"] = max(stats["max"], numeric)
+        return summary
+
+    def _normalise_metrics(self, metrics: Mapping[str, Any]) -> Dict[str, float]:
+        values: Dict[str, float] = {}
+        for name, value in metrics.items():
+            if not isinstance(name, str):
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            values[name.lower()] = numeric
+        return values
+
+    def _resolve_metric_value(
+        self,
+        metric_name: str,
+        metric_summary: Mapping[str, Mapping[str, float]],
+        latest_metrics: Mapping[str, float],
+        *,
+        best_value: float | None,
+        prefer: str,
+    ) -> float | None:
+        metric_key = metric_name.lower()
+        if metric_key == self._metric_name_lc and best_value is not None:
+            if prefer == "min" and self._direction == optuna.study.StudyDirection.MINIMIZE:
+                return float(best_value)
+            if prefer == "max" and self._direction == optuna.study.StudyDirection.MAXIMIZE:
+                return float(best_value)
+
+        stats = metric_summary.get(metric_key)
+        if stats is not None:
+            if prefer == "min":
+                return stats.get("min")
+            if prefer == "max":
+                return stats.get("max")
+
+        return latest_metrics.get(metric_key)
+
     def _request_plan_from_llm(
         self,
         *,
@@ -143,13 +457,26 @@ class MetaSearchAdjuster:
         if self._provider is None:
             return None
 
-        prompt = self._build_prompt(best_value, best_params, trials_completed, settings)
+        schema = self._adjustment_schema(trials_completed, settings)
+        prompt = self._build_prompt(
+            best_value,
+            best_params,
+            trials_completed,
+            settings,
+            schema=schema,
+        )
+        tool = ToolDefinition(
+            name="meta_search_plan",
+            description="Return adjustments to the search strategy using the provided schema.",
+            parameters=schema,
+        )
         try:
             result = self._provider.generate(
                 prompt,
                 temperature=0.1,
-                json_mode=True,
+                json_mode=False,
                 system=self._SYSTEM_PROMPT,
+                tool=tool,
             )
         except Exception:
             return None
@@ -214,6 +541,8 @@ class MetaSearchAdjuster:
         best_params: Mapping[str, Any],
         trials_completed: int,
         settings: SearchSettings,
+        *,
+        schema: Mapping[str, Any],
     ) -> Prompt:
         summary = self._summarise_history(best_value, best_params, settings, trials_completed)
         example_payload = {
@@ -224,6 +553,7 @@ class MetaSearchAdjuster:
             "patience": settings.patience,
             "notes": "Focus on promising regions while keeping exploration.",
         }
+        schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
 
         lines = [
             "以下は最新の試行サマリです。",
@@ -235,12 +565,53 @@ class MetaSearchAdjuster:
             "必ず JSON オブジェクトのみを出力し、キーは sampler, rescale, trial_budget, max_trials, patience, notes を使用してください。",
             "rescale はパラメタ名をキー、0.05〜1.0 の縮小係数を値とするオブジェクトです。不要な場合は空オブジェクトにしてください。",
             "trial_budget は総試行数上限、max_trials は絶対上限、patience は改善なし許容回数を指定します。",
+            "応答は meta_search_plan 関数の引数として Schema に完全準拠する JSON のみを返してください。",
+            "Schema:",
+            schema_text,
             "例:",
             json.dumps(example_payload, ensure_ascii=False, indent=2),
         ]
 
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
+
+    def _adjustment_schema(
+        self, trials_completed: int, settings: SearchSettings
+    ) -> Dict[str, Any]:
+        minimum_trials = max(0, trials_completed)
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "sampler": {
+                    "type": "string",
+                    "enum": sorted(_SUPPORTED_META_SAMPLERS),
+                },
+                "rescale": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "minimum": 0.05,
+                        "maximum": 1.0,
+                    },
+                },
+                "trial_budget": {
+                    "type": "integer",
+                    "minimum": minimum_trials,
+                },
+                "max_trials": {
+                    "type": "integer",
+                    "minimum": minimum_trials,
+                },
+                "patience": {
+                    "anyOf": [
+                        {"type": "integer", "minimum": 0},
+                        {"type": "null"},
+                    ]
+                },
+                "notes": {"type": "string"},
+            },
+        }
 
     def _summarise_history(
         self,
@@ -293,12 +664,23 @@ class MetaSearchAdjuster:
         if not isinstance(data, MutableMapping):
             return None
 
+        allowed_keys = {
+            "sampler",
+            "rescale",
+            "trial_budget",
+            "max_trials",
+            "patience",
+            "notes",
+        }
+        if any(key not in allowed_keys for key in data.keys()):
+            return None
+
         adjustment = MetaAdjustment()
 
         sampler = data.get("sampler")
         if isinstance(sampler, str):
             sampler_lc = sampler.lower()
-            if sampler_lc in {"tpe", "random"}:
+            if sampler_lc in _SUPPORTED_META_SAMPLERS:
                 adjustment.sampler = sampler_lc
 
         rescale = data.get("rescale")
@@ -377,6 +759,7 @@ def create_meta_search_adjuster(
         search_space=search_space,
         llm_cfg=llm_cfg,
         seed=seed,
+        policies=meta_cfg.get("policies"),
     )
 
 

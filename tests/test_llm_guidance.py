@@ -14,7 +14,15 @@ class StubProvider:
         self._responses = deque(responses)
         self.temperatures: List[float | None] = []
 
-    def generate(self, prompt, *, temperature=None, json_mode=False, system=None):  # noqa: ANN001
+    def generate(
+        self,
+        prompt,
+        *,
+        temperature=None,
+        json_mode=False,
+        system=None,
+        tool=None,
+    ):  # noqa: ANN001
         self.temperatures.append(temperature)
         if not self._responses:
             raise RuntimeError("No more responses queued")
@@ -74,7 +82,8 @@ def test_valid_response_is_cached(tmp_path: Path) -> None:
     assert first == payload["proposals"]
 
     second = generator.propose_batch(2)
-    assert second == payload["proposals"]
+    assert second != payload["proposals"]
+    assert len(second) == 2
     stub = getattr(generator, "_test_provider")
     assert len(stub.temperatures) == 1
 
