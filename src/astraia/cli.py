@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - offline fallback
 from .config import OptimizationConfig
 from .llm_guidance import create_llm_provider
 from .llm_providers import ProviderUnavailableError
+from .run_management import prepare_run_environment
 
 if TYPE_CHECKING:
     from .optimization import OptimizationResult
@@ -333,7 +334,12 @@ def main() -> None:
 
     from .optimization import run_optimization
 
-    result = run_optimization(config)
+    config_for_run, _ = prepare_run_environment(
+        config_model=config_model,
+        config_source=args.config,
+    )
+
+    result = run_optimization(config_for_run)
     print(format_result(result))
 
 
