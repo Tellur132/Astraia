@@ -164,10 +164,16 @@ def _write_run_metadata(
     with resolved_path.open("w", encoding="utf-8") as fh:
         json.dump(model.model_dump(mode="json"), fh, indent=2, ensure_ascii=False)
 
+    created_at = datetime.now(timezone.utc)
+
     meta: Dict[str, Any] = {
         "run_id": run_dir.name or run_dir.as_posix(),
         "run_dir": str(run_dir),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at.isoformat(),
+        "status": {
+            "state": "created",
+            "updated_at": created_at.isoformat(),
+        },
         "metadata": model.metadata.model_dump(mode="json"),
         "seed": model.seed,
         "report": {"metrics": model.report.metrics},
