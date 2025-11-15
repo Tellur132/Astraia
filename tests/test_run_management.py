@@ -69,6 +69,8 @@ class PrepareRunEnvironmentTests(unittest.TestCase):
             self.assertEqual(meta["artifacts"]["log"], str(expected_log))
             self.assertEqual(meta["artifacts"]["report"], str(expected_report))
             self.assertEqual(meta["source"]["config_path"], str(config_path))
+            self.assertEqual(meta["status"]["state"], "created")
+            self.assertIn("updated_at", meta["status"])
             self.assertNotIn("llm_usage", meta["artifacts"])
 
     def test_respects_existing_run_root_and_adds_llm_usage(self) -> None:
@@ -99,6 +101,7 @@ class PrepareRunEnvironmentTests(unittest.TestCase):
 
             meta = json.loads(artifacts.meta_path.read_text(encoding="utf-8"))
             self.assertEqual(meta["artifacts"]["llm_usage"], str(artifacts.llm_usage_path))
+            self.assertEqual(meta["status"]["state"], "created")
 
 
 if __name__ == "__main__":  # pragma: no cover
