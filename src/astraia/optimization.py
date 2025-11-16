@@ -375,7 +375,7 @@ def _prepare_pareto_outputs(
     report_dir: Path,
     experiment_name: str,
     seed: int | None,
-    ) -> Dict[str, Any] | None:
+) -> Dict[str, Any] | None:
     if len(metric_names) <= 1:
         return None
 
@@ -409,14 +409,21 @@ def _prepare_pareto_outputs(
     records.sort(key=lambda item: item["trial"])
 
     csv_path = report_dir / f"{experiment_name}_pareto.csv"
+    param_names = _collect_param_names(records)
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        fieldnames = ["trial", *metric_names]
+        fieldnames = [
+            "trial",
+            *metric_names,
+            *[f"param_{name}" for name in param_names],
+        ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for record in records:
             row = {"trial": record["trial"]}
             for metric in metric_names:
                 row[metric] = record["values"].get(metric)
+            for name in param_names:
+                row[f"param_{name}"] = record["params"].get(name)
             writer.writerow(row)
 
     scatter_path = _render_pareto_scatter(
@@ -439,12 +446,185 @@ def _prepare_pareto_outputs(
         seed=seed,
     )
 
+    representatives = _select_pareto_representatives(
+        records=records,
+        metric_names=metric_names,
+        direction_names=direction_names,
+    )
+
     return {
         "records": records,
         "csv_path": csv_path,
         "scatter_path": scatter_path,
         "hypervolume": hypervolume,
+        "representatives": representatives,
+        "param_names": param_names,
     }
+
+
+def _collect_param_names(records: Sequence[Mapping[str, Any]]) -> List[str]:
+    names: set[str] = set()
+    for record in records:
+        params = record.get("params")
+        if isinstance(params, Mapping):
+            names.update(params.keys())
+    return sorted(names)
+
+
+def _select_pareto_representatives(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    metric_names: Sequence[str],
+    direction_names: Sequence[str],
+) -> List[Dict[str, Any]]:
+    representatives: List[Dict[str, Any]] = []
+    metric_stats = _collect_metric_stats(records, metric_names)
+
+    weighted = _select_weighted_solution(
+        records=records,
+        metric_names=metric_names,
+        direction_names=direction_names,
+        metric_stats=metric_stats,
+    )
+    if weighted is not None:
+        _append_representative(
+            representatives,
+            record=weighted,
+            label="Balanced (weighted sum)",
+        )
+
+    for metric, direction in zip(metric_names, direction_names):
+        record = _select_extreme_solution(records, metric, direction)
+        if record is None:
+            continue
+        label = f"Best {metric} ({direction})"
+        _append_representative(representatives, record=record, label=label)
+
+    return representatives
+
+
+def _collect_metric_stats(
+    records: Sequence[Mapping[str, Any]],
+    metric_names: Sequence[str],
+) -> Dict[str, tuple[float | None, float | None]]:
+    stats: Dict[str, tuple[float | None, float | None]] = {}
+    for metric in metric_names:
+        values = []
+        for record in records:
+            metric_value = record.get("values", {}).get(metric)
+            numeric = _safe_float(metric_value)
+            if numeric is not None:
+                values.append(numeric)
+        if values:
+            stats[metric] = (min(values), max(values))
+        else:
+            stats[metric] = (None, None)
+    return stats
+
+
+def _select_weighted_solution(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    metric_names: Sequence[str],
+    direction_names: Sequence[str],
+    metric_stats: Mapping[str, tuple[float | None, float | None]],
+) -> Mapping[str, Any] | None:
+    best_score = float("inf")
+    best_record: Mapping[str, Any] | None = None
+    for record in records:
+        score = 0.0
+        invalid = False
+        for metric, direction in zip(metric_names, direction_names):
+            raw_value = record.get("values", {}).get(metric)
+            normalised = _normalise_metric_value(
+                raw_value,
+                stats=metric_stats.get(metric, (None, None)),
+                direction=direction,
+            )
+            if normalised is None:
+                invalid = True
+                break
+            score += normalised
+        if invalid:
+            continue
+        if score < best_score:
+            best_score = score
+            best_record = record
+    return best_record
+
+
+def _normalise_metric_value(
+    value: Any,
+    *,
+    stats: tuple[float | None, float | None],
+    direction: str,
+) -> float | None:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    lower, upper = stats
+    if lower is None or upper is None:
+        return 0.0
+    if math.isclose(lower, upper, rel_tol=1e-9, abs_tol=1e-12):
+        return 0.0
+    span = upper - lower
+    if span == 0:
+        return 0.0
+    if direction == "minimize":
+        return (numeric - lower) / span
+    return (upper - numeric) / span
+
+
+def _select_extreme_solution(
+    records: Sequence[Mapping[str, Any]],
+    metric: str,
+    direction: str,
+) -> Mapping[str, Any] | None:
+    best_record: Mapping[str, Any] | None = None
+    best_value: float | None = None
+    for record in records:
+        candidate = _safe_float(record.get("values", {}).get(metric))
+        if candidate is None:
+            continue
+        sort_value = candidate if direction == "minimize" else -candidate
+        if best_value is None or sort_value < best_value:
+            best_value = sort_value
+            best_record = record
+    return best_record
+
+
+def _append_representative(
+    collection: List[Dict[str, Any]],
+    *,
+    record: Mapping[str, Any],
+    label: str,
+) -> None:
+    for existing in collection:
+        if existing.get("trial") == record.get("trial"):
+            existing_label = existing.get("label") or ""
+            if label not in existing_label:
+                existing["label"] = (
+                    f"{existing_label}, {label}" if existing_label else label
+                )
+            return
+    collection.append(
+        {
+            "label": label,
+            "trial": record.get("trial"),
+            "values": record.get("values", {}),
+            "params": record.get("params", {}),
+        }
+    )
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
 
 
 class DifferentialEvolutionSampler(optuna.samplers.BaseSampler):
@@ -705,6 +885,32 @@ def _format_metric_value(value: Any) -> str:
     if abs(numeric) >= 1e4 or (abs(numeric) > 0 and abs(numeric) < 1e-3):
         return f"{numeric:.3e}"
     return f"{numeric:.4f}".rstrip("0").rstrip(".")
+
+
+def _format_param_summary(
+    params: Mapping[str, Any],
+    *,
+    preferred_order: Sequence[str],
+    limit: int = 3,
+) -> str:
+    if not params:
+        return "—"
+    ordered = []
+    seen = set()
+    for name in preferred_order:
+        if name in params and name not in seen:
+            ordered.append((name, params[name]))
+            seen.add(name)
+        if len(ordered) >= limit:
+            break
+    if len(ordered) < limit:
+        for name in sorted(params.keys()):
+            if name in seen:
+                continue
+            ordered.append((name, params[name]))
+            if len(ordered) >= limit:
+                break
+    return ", ".join(f"{name}={_format_metric_value(value)}" for name, value in ordered)
 
 
 def ensure_directories(config: Mapping[str, Any]) -> None:
@@ -999,9 +1205,42 @@ def build_report(
 
     if pareto_summary is not None:
         lines.extend(["", "## Pareto Front", ""])
+
+        representatives = pareto_summary.get("representatives") or []
+        param_names = pareto_summary.get("param_names") or []
+        if representatives:
+            lines.extend(["### Representative Solutions", ""])
+            rep_header = (
+                "| Representative | Trial | "
+                + " | ".join(metric_names)
+                + " | Key params |"
+            )
+            rep_separator = "|" + " --- |" * (len(metric_names) + 3)
+            lines.extend([rep_header, rep_separator])
+            for entry in representatives:
+                values = entry.get("values", {})
+                params = entry.get("params", {})
+                row = [
+                    str(entry.get("label", "")),
+                    str(entry.get("trial", "—")),
+                ]
+                row.extend(
+                    _format_metric_value(values.get(metric)) for metric in metric_names
+                )
+                row.append(
+                    _format_param_summary(
+                        params,
+                        preferred_order=param_names,
+                        limit=3,
+                    )
+                )
+                lines.append("| " + " | ".join(row) + " |")
+            lines.append("")
+
+        lines.append("### All Pareto Trials")
         header = "| Trial | " + " | ".join(metric_names) + " |"
         separator = "|" + " --- |" * (len(metric_names) + 1)
-        lines.extend([header, separator])
+        lines.extend(["", header, separator])
         for record in pareto_summary["records"]:
             values = record["values"]
             row = [str(record["trial"])]
@@ -1011,7 +1250,7 @@ def build_report(
         lines.extend(
             [
                 "",
-                f"Pareto CSV: `{pareto_summary['csv_path'].name}`",
+                f"Pareto CSV: `{pareto_summary['csv_path'].name}` (objectives + params)",
             ]
         )
         scatter_path = pareto_summary.get("scatter_path")
