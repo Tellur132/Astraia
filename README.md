@@ -102,7 +102,9 @@ astraia --config configs/qgan_kl.yaml --planner llm \
 - すべての評価器は `BaseEvaluator`（`src/astraia/evaluators/base.py`）を継承し、`evaluate(params, seed)` を実装します。
 - qGAN KL のサンプルは `QGANKLEvaluator`（`src/astraia/evaluators/qgan_kl.py`）として実装済みで、`evaluator.callable: create_evaluator` によってファクトリを呼び出します。
 - 評価結果は `kl`（主指標）や `depth`, `shots`, `params` などを含む辞書で返却され、`search.metric` に一致するキーを Optuna へ報告します。
+- 多目的探索でも Evaluator の戻り値は同じ辞書形式のままで、`search.metric`（単目的）または `search.metrics`（多目的）に列挙されたキーを Optuna へ受け渡すだけで済みます。
 - `BaseEvaluator` は `trial_timeout_sec` / `max_retries` / `graceful_nan_policy` を解釈し、例外・NaN/Inf・タイムアウト発生時でも構造化された失敗ペイロードで探索を継続します。
+- 失敗時は `status != "ok"` や `timed_out: true` が付与され、探索ループは単目的ならペナルティ値（方向に応じて `inf` or `-inf`）を 1 つ、多目的なら `[penalty_value] * n_objectives` を Optuna に返して一貫したスコアリングを行います。
 - 乱数シードは Python/NumPy/PyTorch へ一括で設定され、一時ディレクトリで副作用を隔離します。
 
 ## LLM 連携
