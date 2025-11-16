@@ -140,7 +140,13 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     f"Evaluator did not return required metrics: {missing}."
                 )
 
-            objective_values = [float(metrics[name]) for name in metric_names]
+            objective_values, contains_non_finite = _extract_objective_values(
+                metrics,
+                metric_names,
+            )
+            trial_failed = _trial_failed(metrics) or contains_non_finite
+            if trial_failed:
+                objective_values = _failure_penalty_values(study_directions)
             primary_value = objective_values[0]
 
             trial.set_user_attr("metrics", dict(metrics))
@@ -608,6 +614,46 @@ def _approximate_hypervolume(
         volume *= span
 
     return volume * dominated / samples
+
+
+def _trial_failed(metrics: Mapping[str, MetricValue]) -> bool:
+    status = metrics.get("status")
+    if isinstance(status, str) and status.lower() != "ok":
+        return True
+    timed_out = metrics.get("timed_out")
+    if isinstance(timed_out, bool):
+        return timed_out
+    return bool(timed_out)
+
+
+def _extract_objective_values(
+    metrics: Mapping[str, MetricValue],
+    metric_names: Sequence[str],
+) -> tuple[list[float], bool]:
+    values: list[float] = []
+    contains_non_finite = False
+    for name in metric_names:
+        value = float(metrics[name])
+        if not math.isfinite(value):
+            contains_non_finite = True
+        values.append(value)
+    return values, contains_non_finite
+
+
+def _failure_penalty_values(
+    directions: Sequence[optuna.study.StudyDirection],
+) -> list[float]:
+    penalties: list[float] = []
+    for direction in directions:
+        penalty = (
+            float("inf")
+            if direction == optuna.study.StudyDirection.MINIMIZE
+            else float("-inf")
+        )
+        penalties.append(penalty)
+    if not penalties:
+        penalties.append(float("inf"))
+    return penalties
 
 
 def _transform_objectives(
