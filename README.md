@@ -1,61 +1,63 @@
 # Astraia MVP Skeleton
 
-このリポジトリは、LLM 駆動最適化フレームワーク「Astraia」の最小実装（Minimum Viable Product, MVP）を収録しています。YAML で定義された最適化設定を読み込み、
-Optuna ベースの探索ループを実行し、結果を CSV ログおよび Markdown レポートとして保存します。必要に応じて LLM を用いた探索候補提案
-（LLM Guidance）、進行中の探索戦略調整（Meta Search）、失敗シグナルの診断レポート（LLM Critic）も有効化できます。
+「Astraia」は、YAML 設定で定義した評価器・探索空間を読み込んで Optuna ベースの探索ループを自動生成し、CSV/Markdown/LLM レポートを含む成果物を残す LLM 駆動最適化フレームワークです。本リポジトリには MVP（最小実行可能プロダクト）のソースコードと、誰でもすぐに試せる qGAN KL 最適化のサンプルが含まれています。
 
-## セットアップ
+## 主な機能
 
-Python 3.11 以上を推奨します。依存ライブラリは `PyYAML`、`Optuna`、`Pydantic` を使用します。
-（オフライン環境では最小互換レイヤーが自動ロードされますが、本番では公式実装のインストールを推奨します。）
-OpenAI / Gemini などの LLM を併用する場合はオプショナル依存を extras として指定できます。
+- `configs/` にある YAML 設定を `OptimizationConfig`（`src/astraia/config.py`）で検証しながら読み込み。
+- Optuna による探索・停止条件制御・ベストトライアル追跡を自動化。
+- CSV ログ、Markdown レポート、LLM 使用量ログを `runs/` 以下に保存。
+- LLM ガイダンス / メタ探索 / LLM クリティックで探索候補生成・戦略調整・診断を強化。
+- `astraia runs` サブコマンドで実験管理（一覧、詳細、削除、ステータス更新）が可能。
 
-```bash
-pip install -e .[openai]
-# または
-pip install -e .[gemini]
-pip install -e .[llm]  # 両方まとめて
+## セットアップ手順
 
-# LLM を利用しない場合はベースのみ
-pip install -e .
-```
+1. Python 3.11 以上と pip を用意します。
+2. このリポジトリをクローンし、任意の仮想環境を有効化します。
+3. 依存関係をインストールします。LLM を使用しない場合はベースのみ、OpenAI/Gemini を使う場合は extras を付けます。
 
-LLM プロバイダの API キーは `.env` に記載し、`OPENAI_API_KEY` や `GEMINI_API_KEY` を環境変数として読み込ませてください。
-CLI は LLM プロバイダが設定されている場合に `.env` の必須キーを検証し、自動的に環境変数へ読み込みます。雛形として `.env.example`
-を用意しています。
+   ```bash
+   pip install -e .           # ベースのみ
+   pip install -e .[openai]   # OpenAI 連携
+   pip install -e .[gemini]   # Gemini 連携
+   pip install -e .[llm]      # 両方まとめて
+   ```
 
-## 使い方
+4. LLM API キーを `.env` に追記します（例: `OPENAI_API_KEY=sk-...`）。テンプレートは `.env.example` をコピーしてください。
+5. `astraia --dry-run` を実行すると `.env` の必須キー検証と LLM プロバイダ疎通チェックを行えます。
 
-以下のコマンドを実行すると、`configs/qgan_kl.yaml` を読み込み、探索・評価・レポート生成を含む最小構成の最適化ループが走ります。
+## クイックスタート
+
+サンプル設定（`configs/qgan_kl.yaml`）を用いて最適化を行う場合は次のコマンドを実行します。
 
 ```bash
 astraia --config configs/qgan_kl.yaml
-# または
-python -m astraia.cli --config configs/qgan_kl.yaml
+# または python -m astraia.cli --config configs/qgan_kl.yaml
 ```
 
-実行後は以下が生成されます。
+実行後は以下の成果物が作成されます。
 
-- `runs/qgan_kl_minimal/log.csv`: 各トライアルのパラメタとメトリクスを記録
-- `reports/qgan_kl_minimal.md`: ベストトライアルの概要レポート
-- （LLM を有効化した場合）`runs/qgan_kl_minimal/llm_usage.csv`: LLM 呼び出しの使用量ログ
+- `runs/qgan_kl_minimal/log.csv`: 各トライアルのパラメタとメトリクス
+- `reports/qgan_kl_minimal.md`: ベストトライアルをまとめた Markdown レポート
+- `runs/qgan_kl_minimal/llm_usage.csv`: LLM 呼び出しログ（LLM 有効時のみ）
 
-CLI には確認用のオプションも用意しています。YAML は Pydantic モデルにマップされ、必須フィールドの存在だけでなく型・範囲・依存関係
-まで検証されます（例: `search.metric` が `report.metrics` に含まれているか、探索空間パラメタで `low < high` が守られているか 等）。
+CLI は常に設定ファイルを Pydantic で検証し、`search.metric` と `report.metrics` の整合性や探索空間の境界チェック（`low < high` など）を実施します。実行前に内容を確認したい場合は以下が便利です。
 
 ```bash
-# 設定のサマリのみ表示
-python -m astraia.cli --config configs/qgan_kl.yaml --summarize
+# 設定サマリを確認
+astraia --config configs/qgan_kl.yaml --summarize
 
-# YAML の内容を JSON で出力
-python -m astraia.cli --config configs/qgan_kl.yaml --as-json
+# バリデーション後の設定を JSON で取得
+astraia --config configs/qgan_kl.yaml --as-json
 
-# プランナーのバックエンドを一時的に差し替え
-python -m astraia.cli --config configs/qgan_kl.yaml --planner llm \
+# プランナーを一時的に上書き
+astraia --config configs/qgan_kl.yaml --planner llm \
   --planner-config planner_prompts/qgan_kl_minimal.txt
 ```
 
-## CLI オプション一覧
+## CLI リファレンス
+
+### 基本オプション
 
 | オプション | 説明 |
 | --- | --- |
@@ -63,66 +65,89 @@ python -m astraia.cli --config configs/qgan_kl.yaml --planner llm \
 | `--summarize` | 実行せずに設定サマリのみ出力 |
 | `--as-json` | バリデーション済み設定を JSON で表示 |
 | `--planner {none,rule,llm}` | 設定ファイルのプランナー指定を一時的に上書き |
-| `--planner-config PATH` | プランナー固有設定のパスを注入（例: プロンプトファイル） |
-| `--dry-run` | 実行せずに `.env` の秘密鍵を検証し、LLM プロバイダへ疎通確認を実施 |
+| `--planner-config PATH` | プランナー固有設定（プロンプトなど）を差し替え |
+| `--dry-run` | `.env` の秘密鍵検証と LLM 疎通テストのみ実施 |
+
+### `runs` サブコマンド
+
+`astraia runs` は `runs/` ディレクトリをメタデータ付きで管理します。全サブコマンドは `--runs-root` でルートを変更できます。
+
+| コマンド | 説明 | 例 |
+| --- | --- | --- |
+| `astraia runs list` | 既存の実行を一覧表示。`--status`、`--filter key=value`、`--json`、`--limit` 等で絞り込み可能。 | `astraia runs list --status completed --limit 10` |
+| `astraia runs show --run-id <id>` | 指定した実行のメタデータ・成果物・解決済み設定を表示。`--as-json` も可。 | `astraia runs show --run-id qgan_kl_minimal` |
+| `astraia runs delete --run-id <id>` | 成果物ディレクトリを削除。`--dry-run` や `--yes` で挙動制御。 | `astraia runs delete --run-id old_run --yes` |
+| `astraia runs status --run-id <id>` | 任意の状態メモを付与。`--state`（必須）に加えて `--best-value`、`--metric name=value`、`--payload key=value` で指標を更新。 | `astraia runs status --run-id demo --state archived --best-value 0.12` |
 
 ## 設定ファイルの構成
 
-`OptimizationConfig` (`src/astraia/config.py`) が YAML を検証します。主なセクションは以下のとおりです。
+`src/astraia/config.py` の `OptimizationConfig` が YAML を厳密に検証します。主なセクションは以下の通りです。
 
-- `metadata`: 実験名と説明。
-- `seed`: 乱数シード。LLM ガイダンスやメタ探索の乱択にも利用されます。
-- `search`: Optuna 設定。サンプラーは `tpe` または `random` を指定できます。
-- `stopping`: ループ停止条件 (`max_trials`, `max_time_minutes`, `no_improve_patience`)。
-- `search_space`: 各パラメタの探索範囲を `float` / `int` / `categorical` から選択して定義します。
-- `evaluator`: `module` と `callable` を指定して評価器をロードします。戻り値には主指標（例: `kl`）とレポート対象のメトリクスを含めます。
-- `report`: 出力ディレクトリ、ファイル名、表示したいメトリクスを指定します。`search.metric` に設定した主指標を必ず含めてください。
-- `artifacts`: ログ出力先 (`log_file`) と任意のルート (`run_root`) を指定します。`run_root` を設定すると LLM 使用量ログも同ディレクトリに生成されます。
-- `planner`: ルールベースまたは LLM バックエンドを選択できます。CLI オプションで一時的に無効化 (`none`) も可能です。
-- `llm`: LLM プロバイダ（`openai` / `gemini`）とモデル名、任意の使用量ログ出力先を設定します。未指定の場合でも `artifacts.run_root` があれば自動で `llm_usage.csv` を割り当てます。
-- `llm_guidance`: LLM に探索候補を生成させる機能です。未設定または `enabled: false` の場合は乱択候補にフォールバックします。
-- `meta_search`: 一定間隔で探索状況を要約し、LLM もしくはヒューリスティックでサンプラー切替や探索範囲縮小などの指示を返します。
-- `llm_critic`: 実行後のログを分析し、失敗シグナルと改善提案を Markdown セクションとしてレポートに追加します。LLM が利用できない場合はヒューリスティックの診断を返します。
+- `metadata`: 実験名や説明。`runs list` などで表示されます。
+- `seed`: 乱数シード（Optuna、LLM ガイダンス、メタ探索で共有）。
+- `search`: Optuna 設定。ライブラリやサンプラー、最適化方向（`minimize`/`maximize`）、対象メトリクスを定義。
+- `stopping`: 停止条件 (`max_trials`, `max_time_minutes`, `no_improve_patience`)。
+- `search_space`: `float` / `int` / `categorical` など型別に探索範囲を定義。
+- `evaluator`: `module` と `callable` を指定し、`BaseEvaluator` 互換の評価器をロード。
+- `report`: Markdown レポートの保存先や表示するメトリクス。
+- `artifacts`: ルートディレクトリ (`run_root`)、ログファイル (`log_file`)、追加アーティファクトの出力パス。
+- `planner`: ルール / LLM バックエンド（`backend`）と固有設定パス (`config_path`)。
+- `llm`: `provider`（`openai` or `gemini`）、`model`、`usage_log` などの LLM 設定。
+- `llm_guidance`: LLM を使った候補生成の有効化フラグ、バッチサイズ、プロンプト設定。
+- `meta_search`: トライアル要約頻度、利用する LLM またはヒューリスティックの種類。
+- `llm_critic`: 実行後レポートを生成する LLM/ヒューリスティックの設定。
 
-## 評価モジュールの構造
+## 評価モジュール
 
-- 全ての評価器は `BaseEvaluator` (`src/astraia/evaluators/base.py`) を継承するか、互換の `evaluate(params, seed)` を提供するファクトリから生成します。
-- qGAN KL 用の最小実装は `QGANKLEvaluator` (`src/astraia/evaluators/qgan_kl.py`) として提供され、YAML で `evaluator.callable: create_evaluator` を指定するとインスタンス化されます。
-- 評価結果の辞書には主指標 (`kl`) とレポート対象メトリクス（例: `depth`, `params`, `shots`）を含めます。Optuna への報告値は `search.metric` で指定したキーの値になります。
-- `BaseEvaluator.evaluate` は `trial_timeout_sec` / `max_retries` / `graceful_nan_policy` を受け取り、例外・NaN/Inf・タイムアウト発生時も構造化されたペイロードで復帰します。
-- `BaseEvaluator` は Pydantic で I/O スキーマを検証し、Python 標準乱数・NumPy・PyTorch のシードを一貫して初期化したうえで一時ディレクトリ内で評価を実行します。
+- すべての評価器は `BaseEvaluator`（`src/astraia/evaluators/base.py`）を継承し、`evaluate(params, seed)` を実装します。
+- qGAN KL のサンプルは `QGANKLEvaluator`（`src/astraia/evaluators/qgan_kl.py`）として実装済みで、`evaluator.callable: create_evaluator` によってファクトリを呼び出します。
+- 評価結果は `kl`（主指標）や `depth`, `shots`, `params` などを含む辞書で返却され、`search.metric` に一致するキーを Optuna へ報告します。
+- `BaseEvaluator` は `trial_timeout_sec` / `max_retries` / `graceful_nan_policy` を解釈し、例外・NaN/Inf・タイムアウト発生時でも構造化された失敗ペイロードで探索を継続します。
+- 乱数シードは Python/NumPy/PyTorch へ一括で設定され、一時ディレクトリで副作用を隔離します。
 
-## LLM 機能
+## LLM 連携
 
-- `llm_guidance`: 提案候補をバッチ生成します。LLM 利用が失敗した場合でもキャッシュと乱択フォールバックで探索を継続します。
-- `meta_search`: トライアル履歴を集約し、LLM またはヒューリスティックで探索戦略を更新します。サンプラーの切り替え、探索空間の縮小、早期停止条件の調整に対応しています。
-- `llm_critic`: ログから NaN/Inf や改善停滞を検出し、LLM が有効な場合は Markdown レポートを生成します。使用量は `llm_usage.csv` に追記されます。
-- LLM プロバイダは OpenAI Responses API と Google Gemini に対応し、未インストール時は `ProviderUnavailableError` を検知してヒューリスティックにフォールバックします。
+- `llm_guidance`: LLM で探索候補をバッチ生成し、失敗時はキャッシュや乱択でフォールバックします。
+- `meta_search`: トライアル履歴を要約して LLM またはヒューリスティックに渡し、サンプラー切り替え・探索範囲縮小・早期停止を指示できます。
+- `llm_critic`: 実行ログを解析し、NaN/Inf や停滞を Markdown で報告。`usage_log` または `artifacts.run_root` 配下に `llm_usage.csv` を追記します。
+- `.env` の秘密鍵読み込みは `ensure_env_keys`（`astraia.cli` 内）が行い、未設定の場合は明示的なエラーで終了します。
+- `--dry-run` オプションは設定検証 → `.env` チェック → LLM SDK の `ping` 呼び出し（`create_llm_provider` 経由）までを実行し、ネットワーク疎通や API 権限を事前確認できます。
+
+## ディレクトリ構成
+
+| パス | 内容 |
+| --- | --- |
+| `configs/` | サンプル設定。`qgan_kl.yaml` がデフォルト実験です。 |
+| `planner_prompts/` | LLM プランナー向けのプロンプトテンプレート。`--planner-config` で指定。 |
+| `src/astraia/` | CLI、設定検証、Optuna ループ、LLM 関連モジュールの実装。 |
+| `tests/` | `unittest` ベースのテストスイート。環境差分を減らすため `PYTHONPATH=src` で起動してください。 |
+| `runs/` | 実行ごとの成果物とメタデータ。`astraia runs` で操作します。 |
+| `reports/` | Markdown レポート出力先（`report.output_dir` で変更可）。 |
 
 ## 現在の進捗状況
 
-- qGAN KL 最適化の最小構成となる設定ファイル（`configs/qgan_kl.yaml`）を整備。
-- CLI (`astraia` / `python -m astraia.cli`) から設定読み込み、バリデーション、サマリ表示、JSON 出力、探索実行に対応。
-- Optuna を用いた探索ループを実装し、CSV ログ・Markdown レポートを生成。ベスト指標・早期停止理由も記録。
-- Pydantic ベースの設定スキーマを導入し、探索空間・指標の整合性や LLM 機能の依存関係を検証。
-- LLM ガイダンス、メタ探索アジャスタ、LLM 批評レポート、LLM 使用量ロガーを追加し、依存未インストール時は安全にフォールバック。
+- qGAN KL 最適化の最小構成設定（`configs/qgan_kl.yaml`）を整備。
+- CLI から設定読み込み / バリデーション / サマリ表示 / JSON 出力 / 探索実行 / 実行管理サブコマンドに対応。
+- Optuna ベースの探索ループと CSV ログ・Markdown レポート生成を実装。ベスト値や早期停止理由も記録。
+- Pydantic スキーマで探索空間や LLM 依存関係を検証。
+- LLM ガイダンス、メタ探索、LLM クリティック、使用量ロガーを実装し、依存未インストール時は安全にフォールバック。
 - `tests/` 以下に設定検証・LLM 補助機能・qGAN 評価器のユニットテストを整備。
 
-## 今後のプログラム計画
+## 今後の計画
 
-1. **LLM プランナー/メタ戦略の強化**: プロンプトテンプレートとヒューリスティックのチューニング、追加サンプラー対応。
-2. **評価モジュールの拡充**: 量子回路以外のベンチマークやノイズモデルを追加し、制約評価や多目的指標に対応。
-3. **レポートの可視化強化**: 図表生成や外部トラッキングサービス（MLflow など）との連携を検討。
-4. **オーケストレーション改善**: CLI からのドライラン / 再開機能、実行中メタ情報のストリーミング出力を追加。
+1. **LLM プランナー/メタ戦略の強化**: プロンプトテンプレートの改善や新規サンプラー対応。
+2. **評価モジュールの拡充**: 量子回路以外のベンチマーク、ノイズモデル、多目的指標への拡張。
+3. **レポート可視化の強化**: 図表生成や MLflow 等のトラッキングサービス連携。
+4. **オーケストレーション改善**: 実行再開、ドライラン拡張、ストリーミング出力などの CLI 機能追加。
 
 ## TODO リスト
 
-- [x] Optuna と評価器を接続した最小探索ループの実装
-- [x] CSV ログと Markdown レポート出力の整備
-- [x] LLM ガイダンス / メタ探索 / 批評モジュールと Usage ログ機構の導入
-- [x] CLI オプション（サマリ / JSON 出力 / プランナー上書き）の実装
-- [ ] CI ワークフローでの自動検証（lint / test）の導入
-- [ ] 追加ベンチマーク向け設定ファイルと評価器の実装
+- [x] Optuna + 評価器による最小探索ループ
+- [x] CSV ログ / Markdown レポート出力
+- [x] LLM ガイダンス / メタ探索 / クリティック / 使用量ログ
+- [x] CLI オプションと `runs` サブコマンド
+- [ ] CI ワークフロー（lint/test）の自動実行
+- [ ] 追加ベンチマーク設定と評価器
 
 ## テスト
 
