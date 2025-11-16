@@ -61,6 +61,13 @@ class RunsCliTests(TestCase):
         handle = create_run(_make_config(name), runs_root=self.runs_root)
         return handle.run_id
 
+    @staticmethod
+    def _write_log(path: Path, values: list[float]) -> None:
+        lines = ["trial,param_theta,metric_kl"]
+        for idx, value in enumerate(values):
+            lines.append(f"{idx},0.0,{value}")
+        path.write_text("\n".join(lines), encoding="utf-8")
+
     def test_runs_status_and_list_output(self) -> None:
         run_id = self._create_run("alpha")
 
@@ -168,3 +175,37 @@ class RunsCliTests(TestCase):
         )
 
         self.assertIn("No configuration differences found", output)
+
+    def test_runs_compare_command_outputs_table_and_json(self) -> None:
+        handle_a = create_run(_make_config("iota"), runs_root=self.runs_root)
+        handle_b = create_run(_make_config("kappa"), runs_root=self.runs_root)
+        self._write_log(handle_a.artifacts.log_path, [0.5, 0.2])
+        self._write_log(handle_b.artifacts.log_path, [0.4, 0.1])
+
+        output = self._invoke(
+            "runs",
+            "compare",
+            "--runs-root",
+            str(self.runs_root),
+            "--runs",
+            handle_a.run_id,
+            handle_b.run_id,
+        )
+        self.assertIn(handle_a.run_id, output)
+        self.assertIn(handle_b.run_id, output)
+        self.assertIn("0.2", output)
+
+        json_payload = self._invoke(
+            "runs",
+            "compare",
+            "--runs-root",
+            str(self.runs_root),
+            "--runs",
+            handle_a.run_id,
+            handle_b.run_id,
+            "--json",
+        )
+        parsed = json.loads(json_payload)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["run_id"], handle_a.run_id)
+        self.assertIn("metrics", parsed[0])

@@ -9,6 +9,7 @@ dependencies = [
   "optuna>=3.6",
   "pydantic>=2.5",
   "matplotlib>=3.8",
+  "pandas>=2.2",
 ]
 authors = [
   { name = "Astraia Dev Team" }
