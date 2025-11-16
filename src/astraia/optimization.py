@@ -10,7 +10,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import inspect
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import optuna
 from optuna.distributions import BaseDistribution, FloatDistribution
@@ -55,7 +55,7 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     primary_metric = metric_names[0]
 
     sampler = build_sampler(search_cfg, config.get("seed"))
-    study = create_study(search_cfg, sampler, direction_names)
+    study = create_study(search_cfg, sampler, direction_names, seed=config.get("seed"))
 
     stopping_cfg = config.get("stopping", {})
     max_trials = int(stopping_cfg.get("max_trials", search_cfg["n_trials"]))
@@ -131,25 +131,16 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
 
             trial = study.ask()
             params = sample_params(trial, search_space)
-            metrics = evaluator(params, seed)
-
-            missing_metrics = [name for name in metric_names if name not in metrics]
-            if missing_metrics:
-                missing = ", ".join(missing_metrics)
-                raise RuntimeError(
-                    f"Evaluator did not return required metrics: {missing}."
-                )
-
-            objective_values, contains_non_finite = _extract_objective_values(
-                metrics,
-                metric_names,
+            metrics, objective_values = _execute_trial(
+                trial,
+                evaluator,
+                params=params,
+                metric_names=metric_names,
+                study_directions=study_directions,
+                seed=seed,
             )
-            trial_failed = _trial_failed(metrics) or contains_non_finite
-            if trial_failed:
-                objective_values = _failure_penalty_values(study_directions)
             primary_value = objective_values[0]
 
-            trial.set_user_attr("metrics", dict(metrics))
             if len(objective_values) == 1:
                 study.tell(trial, primary_value)
             else:
@@ -280,6 +271,42 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         hypervolume=hypervolume,
         total_cost=total_cost,
     )
+
+
+def _execute_trial(
+    trial: optuna.trial.Trial,
+    evaluator: Callable[[Dict[str, Any], int | None], EvaluatorResult],
+    *,
+    params: Mapping[str, Any],
+    metric_names: Sequence[str],
+    study_directions: Sequence[optuna.study.StudyDirection],
+    seed: int | None,
+) -> tuple[Dict[str, MetricValue], Tuple[float, ...]]:
+    metrics = dict(evaluator(params, seed))
+
+    missing_metrics = [name for name in metric_names if name not in metrics]
+    if missing_metrics:
+        missing = ", ".join(missing_metrics)
+        raise RuntimeError(f"Evaluator did not return required metrics: {missing}.")
+
+    objective_values, contains_non_finite = _extract_objective_values(
+        metrics,
+        metric_names,
+    )
+    trial_failed = _trial_failed(metrics) or contains_non_finite
+    if trial_failed:
+        objective_values = _failure_penalty_values(study_directions)
+
+    tuple_values = tuple(objective_values)
+    for step, value in enumerate(tuple_values):
+        trial.report(value, step=step)
+
+    trial.set_user_attr("metrics", dict(metrics))
+    # Placeholders for future Pareto analytics.
+    trial.set_user_attr("dominates", False)
+    trial.set_user_attr("pareto_rank", None)
+
+    return dict(metrics), tuple_values
 
 
 def _collect_search_metrics(search_cfg: Mapping[str, Any]) -> List[str]:
@@ -781,6 +808,8 @@ def create_study(
     search_cfg: Mapping[str, Any],
     sampler: optuna.samplers.BaseSampler,
     direction_names: Sequence[str],
+    *,
+    seed: int | None,
 ) -> optuna.study.Study:
     if len(direction_names) == 1:
         return optuna.create_study(
@@ -788,11 +817,35 @@ def create_study(
             direction=direction_names[0],
             sampler=sampler,
         )
+    sampler_params = search_cfg.get("sampler_params")
+    nsga_sampler = _build_nsga_sampler(sampler_params, seed)
     return optuna.create_study(
         study_name=search_cfg.get("study_name"),
         directions=list(direction_names),
-        sampler=sampler,
+        sampler=nsga_sampler,
     )
+
+
+def _build_nsga_sampler(
+    sampler_params: Any,
+    seed: int | None,
+) -> optuna.samplers.NSGAIISampler:
+    allowed_keys = {
+        "population_size",
+        "mutation_prob",
+        "mutation_eta",
+        "crossover_prob",
+        "crossover_eta",
+        "swapping_prob",
+    }
+    kwargs: Dict[str, Any] = {}
+    if isinstance(sampler_params, Mapping):
+        for key in allowed_keys:
+            if key in sampler_params:
+                kwargs[key] = sampler_params[key]
+    if seed is not None and "seed" not in kwargs:
+        kwargs["seed"] = seed
+    return optuna.samplers.NSGAIISampler(**kwargs)
 
 
 def sample_params(trial: optuna.trial.Trial, space: Mapping[str, Any]) -> Dict[str, Any]:
