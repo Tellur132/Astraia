@@ -55,6 +55,15 @@ astraia --config configs/qgan_kl.yaml --planner llm \
   --planner-config planner_prompts/qgan_kl_minimal.txt
 ```
 
+### 多目的ベンチマークのサンプル
+
+LLM を一切使わずに多目的探索を試したい場合は次の設定を利用できます。
+
+- `configs/qgan_kl_multi.yaml`: qGAN KL に深さ (`depth`) とショット数 (`shots`) を加えた 3 目的問題。Optuna の NSGA-II サンプラーで KL・深さ・ショット数を同時に最小化します。
+- `configs/zdt3_multi.yaml`: 連続関数ベンチマーク ZDT3 を evaluator 化した純粋な 2 目的探索。5 次元の連続パラメタ空間を用い、量子特有メトリクスを使わずに挙動を確認できます。
+
+どちらも `llm_guidance` と `meta_search` を無効化しているため、API キーを持っていない環境でも `astraia --config <file>` だけで動作します。
+
 ## CLI リファレンス
 
 ### 基本オプション
@@ -100,7 +109,8 @@ astraia --config configs/qgan_kl.yaml --planner llm \
 ## 評価モジュール
 
 - すべての評価器は `BaseEvaluator`（`src/astraia/evaluators/base.py`）を継承し、`evaluate(params, seed)` を実装します。
-- qGAN KL のサンプルは `QGANKLEvaluator`（`src/astraia/evaluators/qgan_kl.py`）として実装済みで、`evaluator.callable: create_evaluator` によってファクトリを呼び出します。
+- qGAN KL のサンプルは `QGANKLEvaluator`（`src/astraia/evaluators/qgan_kl.py`）として実装済みで、`evaluator.callable: create_evaluator` によってファクトリを呼び出します。`depth` や `shots` を探索空間に含めれば多目的指標としてそのまま最適化できます。
+- 連続関数ベンチマークとして ZDT3 evaluator（`src/astraia/evaluators/zdt3.py`）を追加。`f1` と `f2` を Optuna の多目的サンプラーへ直接渡せます。
 - 評価結果は `kl`（主指標）や `depth`, `shots`, `params` などを含む辞書で返却され、`search.metric` に一致するキーを Optuna へ報告します。
 - 多目的探索でも Evaluator の戻り値は同じ辞書形式のままで、`search.metric`（単目的）または `search.metrics`（多目的）に列挙されたキーを Optuna へ受け渡すだけで済みます。
 - `BaseEvaluator` は `trial_timeout_sec` / `max_retries` / `graceful_nan_policy` を解釈し、例外・NaN/Inf・タイムアウト発生時でも構造化された失敗ペイロードで探索を継続します。
@@ -128,7 +138,7 @@ astraia --config configs/qgan_kl.yaml --planner llm \
 
 ## 現在の進捗状況
 
-- qGAN KL 最適化の最小構成設定（`configs/qgan_kl.yaml`）を整備。
+- qGAN KL 最適化の最小構成設定（`configs/qgan_kl.yaml`）に加え、多目的版（`configs/qgan_kl_multi.yaml`）と ZDT3 連続ベンチマーク（`configs/zdt3_multi.yaml`）を整備。
 - CLI から設定読み込み / バリデーション / サマリ表示 / JSON 出力 / 探索実行 / 実行管理サブコマンドに対応。
 - Optuna ベースの探索ループと CSV ログ・Markdown レポート生成を実装。ベスト値や早期停止理由も記録。
 - Pydantic スキーマで探索空間や LLM 依存関係を検証。

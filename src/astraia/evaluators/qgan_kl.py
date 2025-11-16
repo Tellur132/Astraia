@@ -30,6 +30,7 @@ class QGANKLEvaluator(BaseEvaluator):
 
         depth = max(1, int(params.get("depth", 1)))
         theta = float(params.get("theta", 0.0))
+        shots = max(1, int(params.get("shots", self.shots)))
 
         generator_var = 0.4 + 0.25 * depth
         generator_var = max(generator_var, 1e-3)
@@ -47,6 +48,7 @@ class QGANKLEvaluator(BaseEvaluator):
             elapsed = time.perf_counter() - start
             return self._failure_result(
                 depth=depth,
+                shots=shots,
                 param_count=len(params),
                 elapsed=elapsed,
                 reason="nan_detected" if math.isnan(raw_kl) else "kl_overflow",
@@ -55,7 +57,7 @@ class QGANKLEvaluator(BaseEvaluator):
         rng = random.Random()
         derived_seed = self._seed_from_params(params, seed)
         rng.seed(derived_seed)
-        noise_scale = 0.015 * (1 + 1 / max(self.shots, 1))
+        noise_scale = 0.015 * (1 + 1 / max(shots, 1))
         noisy_kl = raw_kl + rng.gauss(0.0, noise_scale)
         kl = max(0.0, noisy_kl)
 
@@ -63,6 +65,7 @@ class QGANKLEvaluator(BaseEvaluator):
             elapsed = time.perf_counter() - start
             return self._failure_result(
                 depth=depth,
+                shots=shots,
                 param_count=len(params),
                 elapsed=elapsed,
                 reason="nan_detected",
@@ -76,6 +79,7 @@ class QGANKLEvaluator(BaseEvaluator):
         if math.isnan(kl):
             return self._failure_result(
                 depth=depth,
+                shots=shots,
                 param_count=len(params),
                 elapsed=elapsed,
                 reason="nan_detected",
@@ -90,7 +94,7 @@ class QGANKLEvaluator(BaseEvaluator):
         result: EvaluatorResult = {
             "kl": float(kl),
             "depth": float(depth),
-            "shots": float(self.shots),
+            "shots": float(shots),
             "params": float(len(params)),
             "status": status,
             "timed_out": timed_out,
@@ -113,6 +117,7 @@ class QGANKLEvaluator(BaseEvaluator):
         self,
         *,
         depth: int,
+        shots: int,
         param_count: int,
         elapsed: float,
         reason: str,
@@ -120,7 +125,7 @@ class QGANKLEvaluator(BaseEvaluator):
         return {
             "kl": float("inf"),
             "depth": float(depth),
-            "shots": float(self.shots),
+            "shots": float(shots),
             "params": float(param_count),
             "status": "error",
             "reason": reason,
