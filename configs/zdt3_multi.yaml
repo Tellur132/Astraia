@@ -1,0 +1,51 @@
+metadata:
+  name: zdt3_multi
+  description: ZDT3 連続関数を evaluator に使った純粋な多目的探索の例。
+seed: 7
+search:
+  library: optuna
+  sampler: nsga2
+  n_trials: 20
+  multi_objective: true
+  metrics: [f1, f2]
+  directions: [minimize, minimize]
+stopping:
+  max_trials: 20
+  max_time_minutes: 10
+search_space:
+  x1:
+    type: float
+    low: 0.0
+    high: 1.0
+  x2:
+    type: float
+    low: 0.0
+    high: 1.0
+  x3:
+    type: float
+    low: 0.0
+    high: 1.0
+  x4:
+    type: float
+    low: 0.0
+    high: 1.0
+  x5:
+    type: float
+    low: 0.0
+    high: 1.0
+llm_guidance:
+  enabled: false
+meta_search:
+  enabled: false
+evaluator:
+  module: astraia.evaluators.zdt3
+  callable: create_zdt3_evaluator
+report:
+  output_dir: reports
+  filename: zdt3_multi.md
+  metrics:
+    - f1
+    - f2
+artifacts:
+  run_root: runs/zdt3_multi
+  log_file: runs/zdt3_multi/log.csv

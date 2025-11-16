@@ -70,6 +70,16 @@ class QGANKLEvaluatorTests(unittest.TestCase):
         self.assertEqual(metrics.get("reason"), "timeout_exceeded")
         self.assertTrue(math.isinf(metrics["kl"]))
 
+    def test_shots_parameter_overrides_default(self) -> None:
+        evaluator = QGANKLEvaluator(backend="pennylane", shots=512)
+        params = dict(self.params)
+        params["shots"] = 64
+        metrics = evaluator.evaluate(params, seed=5)
+        self.assertEqual(metrics["shots"], 64.0)
+        reference = evaluator.evaluate(self.params, seed=5)
+        self.assertEqual(reference["shots"], 512.0)
+        self.assertNotEqual(metrics["kl"], reference["kl"])  # ノイズスケールが変わる
+
     def test_loader_returns_callable(self) -> None:
         evaluator_fn = load_evaluator(self.config)
         metrics = evaluator_fn(self.params, seed=42)
