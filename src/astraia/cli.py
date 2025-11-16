@@ -271,6 +271,21 @@ def _configure_runs_subcommands(
         help="Arbitrary extra key/value pairs stored alongside the status.",
     )
 
+    diff_parser = runs_subparsers.add_parser(
+        "diff",
+        help="Compare resolved configuration differences across runs.",
+        description="Compare resolved configuration differences across runs.",
+    )
+    _add_runs_root_argument(diff_parser)
+    diff_parser.add_argument(
+        "--run-id",
+        action="append",
+        dest="run_ids",
+        required=True,
+        metavar="RUN_ID",
+        help="Run identifier to include in the comparison (repeat for multiple runs).",
+    )
+
 
 def parse_env_file(path: Path) -> Dict[str, str]:
     """Parse key-value pairs from a dotenv-style file."""
@@ -451,6 +466,8 @@ def _handle_runs_command(args: argparse.Namespace) -> None:
         _runs_delete_command(args)
     elif command == "status":
         _runs_status_command(args)
+    elif command == "diff":
+        _runs_diff_command(args)
     else:  # pragma: no cover - argparse prevents this path
         raise SystemExit(f"Unknown runs sub-command: {command}")
 
@@ -558,6 +575,114 @@ def _runs_status_command(args: argparse.Namespace) -> None:
         **payload,
     )
     print(f"Run '{updated.run_id}' status updated to {updated.status}.")
+
+
+_MISSING = object()
+
+
+def _runs_diff_command(args: argparse.Namespace) -> None:
+    run_ids: Sequence[str] = getattr(args, "run_ids", []) or []
+    if len(run_ids) < 2:
+        raise SystemExit("--run-id must be provided at least twice to compare runs")
+
+    configs: Dict[str, Mapping[str, Any]] = {}
+    run_dirs: Dict[str, str] = {}
+    for run_id in run_ids:
+        metadata = tracking_load_run(run_id, runs_root=args.runs_root)
+        config = _load_config_artifact(metadata)
+        if config is None:
+            raise SystemExit(
+                f"Run '{run_id}' does not have a resolved configuration artifact to diff."
+            )
+        configs[run_id] = config
+        run_dirs[run_id] = str(metadata.run_dir)
+
+    rendered = _render_config_diff(
+        configs,
+        ordered_ids=list(run_ids),
+        run_dirs=run_dirs,
+    )
+    if rendered:
+        print(rendered)
+    else:
+        print("No configuration differences found between the selected runs.")
+
+
+def _render_config_diff(
+    configs: Mapping[str, Mapping[str, Any]], *, ordered_ids: Sequence[str], run_dirs: Mapping[str, str]
+) -> str | None:
+    flattened = {run_id: _flatten_config_for_diff(config) for run_id, config in configs.items()}
+    all_keys: list[str] = sorted({key for mapping in flattened.values() for key in mapping})
+    if not all_keys:
+        return None
+
+    rows: list[list[str]] = []
+    for key in all_keys:
+        normalized: list[Any] = []
+        display: list[str] = []
+        for run_id in ordered_ids:
+            run_values = flattened.get(run_id, {})
+            value = run_values.get(key, _MISSING)
+            normalized.append(_normalize_diff_value(value, run_dirs.get(run_id)))
+            display.append(_format_diff_value(value, run_dirs.get(run_id)))
+        if normalized and all(item == normalized[0] for item in normalized):
+            continue
+        rows.append([key, *display])
+
+    if not rows:
+        return None
+
+    headers = ["key", *ordered_ids]
+    return _render_table(headers, rows)
+
+
+def _flatten_config_for_diff(
+    payload: Mapping[str, Any], prefix: str | None = None
+) -> Dict[str, Any]:
+    flattened: Dict[str, Any] = {}
+    for key, value in payload.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            flattened.update(_flatten_config_for_diff(value, path))
+        else:
+            flattened[path] = value
+    return flattened
+
+
+def _normalize_diff_value(value: Any, run_dir: str | None) -> Any:
+    if value is _MISSING:
+        return _MISSING
+    value = _normalise_run_path(value, run_dir)
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _format_diff_value(value: Any, run_dir: str | None) -> str:
+    if value is _MISSING:
+        return "-"
+    value = _normalise_run_path(value, run_dir)
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _normalise_run_path(value: Any, run_dir: str | None) -> Any:
+    if not run_dir or not isinstance(value, str):
+        return value
+    run_dir = str(run_dir).rstrip("/\\")
+    candidate = value.replace("\\", "/")
+    normalized_root = run_dir.replace("\\", "/")
+    if candidate == normalized_root:
+        return "<run_root>"
+    if candidate.startswith(f"{normalized_root}/"):
+        suffix = candidate[len(normalized_root) + 1 :]
+        return f"<run_root>/{suffix}" if suffix else "<run_root>"
+    return value
 
 
 def _parse_key_value_pairs(items: Sequence[str], *, flag: str) -> Dict[str, Any]:
