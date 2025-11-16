@@ -20,6 +20,7 @@ from .config import OptimizationConfig
 from .llm_guidance import create_llm_provider
 from .llm_providers import ProviderUnavailableError
 from .run_management import prepare_run_environment
+from .run_summary import summarize_run_results
 from .tracking import RunMetadata
 from .tracking import list_runs as tracking_list_runs
 from .tracking import load_run as tracking_load_run
@@ -286,6 +287,40 @@ def _configure_runs_subcommands(
         help="Run identifier to include in the comparison (repeat for multiple runs).",
     )
 
+    compare_parser = runs_subparsers.add_parser(
+        "compare",
+        help="Compare key metrics across completed runs.",
+        description="Compare key metrics across completed runs.",
+    )
+    _add_runs_root_argument(compare_parser)
+    compare_parser.add_argument(
+        "--runs",
+        nargs="+",
+        metavar="RUN_ID",
+        required=True,
+        help="Run identifiers to include in the comparison table.",
+    )
+    compare_parser.add_argument(
+        "--metric",
+        action="append",
+        dest="metrics",
+        metavar="NAME",
+        help="Restrict the comparison to specific metric names (default: all).",
+    )
+    compare_parser.add_argument(
+        "--stat",
+        action="append",
+        dest="stats",
+        metavar="NAME",
+        choices=("best", "median", "mean"),
+        help="Summary statistic to include (repeat for multiple; default: best, median, mean).",
+    )
+    compare_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON instead of a formatted table.",
+    )
+
 
 def parse_env_file(path: Path) -> Dict[str, str]:
     """Parse key-value pairs from a dotenv-style file."""
@@ -468,6 +503,8 @@ def _handle_runs_command(args: argparse.Namespace) -> None:
         _runs_status_command(args)
     elif command == "diff":
         _runs_diff_command(args)
+    elif command == "compare":
+        _runs_compare_command(args)
     else:  # pragma: no cover - argparse prevents this path
         raise SystemExit(f"Unknown runs sub-command: {command}")
 
@@ -606,6 +643,71 @@ def _runs_diff_command(args: argparse.Namespace) -> None:
         print(rendered)
     else:
         print("No configuration differences found between the selected runs.")
+
+
+def _runs_compare_command(args: argparse.Namespace) -> None:
+    run_ids: Sequence[str] = getattr(args, "runs", []) or []
+    if not run_ids:
+        raise SystemExit("--runs expects at least one run identifier")
+
+    metrics = getattr(args, "metrics", None)
+    stats = getattr(args, "stats", None)
+
+    summaries: list[Dict[str, Any]] = []
+    for run_id in run_ids:
+        metadata = tracking_load_run(run_id, runs_root=args.runs_root)
+        config = _load_config_artifact(metadata)
+        summary = summarize_run_results(
+            metadata,
+            config=config,
+            metrics=metrics,
+            statistic_names=stats,
+        )
+        summaries.append(summary)
+
+    if getattr(args, "json", False):
+        print(json.dumps(summaries, indent=2, ensure_ascii=False))
+        return
+
+    stat_labels: Sequence[str] = stats or ("best", "median", "mean")
+    headers = [
+        "run_id",
+        "metric",
+        *stat_labels,
+        "n_trials",
+        "valid_trials",
+        "early_stop",
+    ]
+    rows: list[list[str]] = []
+    for summary in summaries:
+        metrics_payload = summary.get("metrics") or {}
+        metric_items = list(metrics_payload.items())
+        if not metric_items:
+            metric_items = [("-", {})]
+        for idx, (metric_name, values) in enumerate(metric_items):
+            row = [
+                summary["run_id"] if idx == 0 else "",
+                metric_name,
+            ]
+            for label in stat_labels:
+                row.append(_format_best_value(values.get(label)))
+            if idx == 0:
+                row.extend(
+                    [
+                        str(summary.get("n_trials", 0)),
+                        str(summary.get("n_valid_trials", 0)),
+                        summary.get("early_stop_reason") or "-",
+                    ]
+                )
+            else:
+                row.extend(["", "", ""])
+            rows.append(row)
+
+    if not rows:
+        print("No metrics available for the selected runs.")
+        return
+
+    print(_render_table(headers, rows))
 
 
 def _render_config_diff(
