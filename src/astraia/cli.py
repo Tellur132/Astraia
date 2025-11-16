@@ -435,16 +435,14 @@ def summarize_config(config: Dict[str, Any]) -> str:
     stopping = config.get("stopping", {})
     report = config.get("report", {})
 
-    direction = search.get("direction", "N/A")
-    if isinstance(direction, list):
-        direction_display = ", ".join(str(item) for item in direction)
-    else:
-        direction_display = str(direction)
-    metric = search.get("metric", "kl")
-    if isinstance(metric, list):
-        metric_display = ", ".join(str(item) for item in metric)
-    else:
-        metric_display = str(metric)
+    metrics, directions, multi_objective = _extract_objective_settings(search)
+    metric_display = ", ".join(metrics) if metrics else "N/A"
+    direction_pairs = [
+        f"{direction}: {metric}"
+        for metric, direction in zip(metrics, directions, strict=False)
+    ]
+    direction_display = ", ".join(direction_pairs) if direction_pairs else "N/A"
+    multi_display = "yes" if multi_objective else "no"
 
     lines = [
         f"Experiment name : {metadata.get('name', 'N/A')}",
@@ -454,8 +452,9 @@ def summarize_config(config: Dict[str, Any]) -> str:
         f"  Library      : {search.get('library', 'N/A')}",
         f"  Sampler      : {search.get('sampler', 'N/A')}",
         f"  Trials       : {search.get('n_trials', 'N/A')}",
-        f"  Direction    : {direction_display}",
-        f"  Metric       : {metric_display}",
+        f"  Multi-objective : {multi_display}",
+        f"  Metrics      : {metric_display}",
+        f"  Directions   : {direction_display}",
         "",
         "[Stopping]",
         f"  max_trials   : {stopping.get('max_trials', 'N/A')}",
@@ -468,6 +467,29 @@ def summarize_config(config: Dict[str, Any]) -> str:
     ]
 
     return "\n".join(lines)
+
+
+def _extract_objective_settings(search: Mapping[str, Any]) -> tuple[list[str], list[str], bool]:
+    metrics = _ensure_string_list(search.get("metrics"))
+    if not metrics:
+        metrics = _ensure_string_list(search.get("metric"))
+    directions = _ensure_string_list(search.get("directions"))
+    if not directions:
+        directions = _ensure_string_list(search.get("direction"))
+    if metrics and not directions:
+        directions = ["minimize"] * len(metrics)
+    elif len(directions) == 1 and len(metrics) > 1:
+        directions = directions * len(metrics)
+    multi_objective = bool(search.get("multi_objective")) or len(metrics) > 1
+    return metrics, directions, multi_objective
+
+
+def _ensure_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [str(item) for item in value]
+    return []
 
 
 def format_result(result: "OptimizationResult") -> str:

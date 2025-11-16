@@ -55,17 +55,35 @@ class OptimizationConfigValidationTests(unittest.TestCase):
 
     def test_multi_objective_configuration(self) -> None:
         data = make_base_config()
-        data["search"]["metric"] = ["kl", "depth"]
-        data["search"]["direction"] = ["minimize", "minimize"]
+        data["search"]["multi_objective"] = True
+        data["search"].pop("metric")
+        data["search"]["metrics"] = ["kl", "depth"]
+        data["search"]["directions"] = ["minimize", "minimize"]
         data["report"]["metrics"] = ["kl", "depth", "shots"]
         config = OptimizationConfig.model_validate(data)
+        self.assertTrue(config.search.multi_objective)
         self.assertEqual(config.search.metric_names, ["kl", "depth"])
         self.assertEqual(config.search.direction_names, ["minimize", "minimize"])
 
     def test_metric_and_direction_length_must_match(self) -> None:
         data = make_base_config()
-        data["search"]["metric"] = ["kl", "depth"]
-        data["search"]["direction"] = "minimize"
+        data["search"]["multi_objective"] = True
+        data["search"].pop("metric")
+        data["search"]["metrics"] = ["kl", "depth"]
+        data["search"]["directions"] = ["minimize"]
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_multi_objective_flag_requires_multiple_metrics(self) -> None:
+        data = make_base_config()
+        data["search"]["multi_objective"] = True
+        with self.assertRaises(ValidationError):
+            OptimizationConfig.model_validate(data)
+
+    def test_multiple_metrics_require_multi_objective_flag(self) -> None:
+        data = make_base_config()
+        data["search"]["metrics"] = ["kl", "depth"]
+        data["search"].pop("metric")
         with self.assertRaises(ValidationError):
             OptimizationConfig.model_validate(data)
 
