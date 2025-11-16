@@ -132,3 +132,39 @@ class RunsCliTests(TestCase):
         )
 
         self.assertFalse(run_dir.exists())
+
+    def test_runs_diff_command_highlights_changes(self) -> None:
+        first = self._create_run("delta")
+        second = self._create_run("epsilon")
+
+        output = self._invoke(
+            "runs",
+            "diff",
+            "--run-id",
+            first,
+            "--run-id",
+            second,
+            "--runs-root",
+            str(self.runs_root),
+        )
+
+        self.assertIn("metadata.name", output)
+        self.assertIn("delta", output)
+        self.assertIn("epsilon", output)
+
+    def test_runs_diff_command_reports_identical_configs(self) -> None:
+        first = self._create_run("theta")
+        second = self._create_run("theta")
+
+        output = self._invoke(
+            "runs",
+            "diff",
+            "--run-id",
+            first,
+            "--run-id",
+            second,
+            "--runs-root",
+            str(self.runs_root),
+        )
+
+        self.assertIn("No configuration differences found", output)
