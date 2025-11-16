@@ -124,26 +124,31 @@ def _resolve_metric_directions(
     search = config.get("search")
     if not isinstance(search, Mapping):
         return directions
-    metric_field = search.get("metric")
-    direction_field = search.get("direction")
 
-    if isinstance(metric_field, str):
-        metric_list = [metric_field]
-    elif isinstance(metric_field, Sequence):
-        metric_list = [str(item) for item in metric_field]
-    else:
-        metric_list = []
+    metric_list = _coerce_string_list(search.get("metrics"))
+    if not metric_list:
+        metric_list = _coerce_string_list(search.get("metric"))
 
-    if isinstance(direction_field, str):
-        direction_list = [direction_field]
-    elif isinstance(direction_field, Sequence):
-        direction_list = [str(item) for item in direction_field]
-    else:
-        direction_list = []
+    direction_list = _coerce_string_list(search.get("directions"))
+    if not direction_list:
+        direction_list = _coerce_string_list(search.get("direction"))
 
-    for metric, direction in zip(metric_list, direction_list, strict=False):  # type: ignore[arg-type]
+    if metric_list and not direction_list:
+        direction_list = ["minimize"] * len(metric_list)
+    elif len(direction_list) == 1 and len(metric_list) > 1:
+        direction_list = direction_list * len(metric_list)
+
+    for metric, direction in zip(metric_list, direction_list, strict=False):
         directions[str(metric)] = str(direction).lower()
     return directions
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [str(item) for item in value]
+    return []
 
 
 def _apply_reducer(values: Sequence[float], reducer: MetricReducer, direction: str) -> Any:

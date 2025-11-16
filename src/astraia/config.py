@@ -44,8 +44,11 @@ class SearchConfig(BaseModel):
     library: str = "optuna"
     sampler: str = "tpe"
     n_trials: int
-    direction: str | List[str]
-    metric: str | List[str]
+    direction: str | List[str] | None = "minimize"
+    metric: str | List[str] | None = None
+    metrics: List[str] | None = None
+    directions: List[str] | None = None
+    multi_objective: bool = False
     study_name: str | None = None
 
     @model_validator(mode="after")
@@ -71,47 +74,60 @@ class SearchConfig(BaseModel):
                 "search.sampler must be one of " + ", ".join(sorted(allowed_samplers))
             )
 
-        directions = self._normalise_sequence(self.direction, field="direction")
-        normalised_dirs: List[str] = []
-        for direction in directions:
-            direction_lc = direction.lower().strip()
-            if direction_lc not in {"minimize", "maximize"}:
-                raise ValueError("search.direction entries must be 'minimize' or 'maximize'")
-            normalised_dirs.append(direction_lc)
-        self.direction = (
-            normalised_dirs[0] if len(normalised_dirs) == 1 else normalised_dirs
-        )
+        self.multi_objective = bool(self.multi_objective)
+
+        metrics = self._resolve_metric_names()
+        if not metrics:
+            raise ValueError("search.metric must define at least one objective")
+
+        if not self.multi_objective and len(metrics) > 1:
+            raise ValueError(
+                "search.multi_objective must be true when multiple metrics are defined"
+            )
+        if self.multi_objective and len(metrics) < 2:
+            raise ValueError(
+                "search.metrics must define at least two objectives when multi_objective is true"
+            )
+
+        directions = self._resolve_direction_names(expected=len(metrics))
+        if self.multi_objective and len(directions) != len(metrics):
+            raise ValueError(
+                "search.directions must have the same number of entries as search.metrics"
+            )
 
         if self.n_trials <= 0:
             raise ValueError("search.n_trials must be a positive integer")
 
-        metrics = self._normalise_sequence(self.metric, field="metric")
-        normalised_metrics: List[str] = []
-        for metric in metrics:
-            metric_name = metric.strip()
-            if not metric_name:
-                raise ValueError("search.metric entries must be non-empty strings")
-            normalised_metrics.append(metric_name)
-        self.metric = normalised_metrics[0] if len(normalised_metrics) == 1 else normalised_metrics
-
-        if len(self.metric_names) != len(self.direction_names):
-            raise ValueError(
-                "search.metric and search.direction must have the same number of entries"
-            )
+        if self.multi_objective:
+            self.metric = None
+            self.direction = None
+        else:
+            self.metric = metrics[0]
+            self.direction = directions[0]
+        self.metrics = metrics
+        self.directions = directions
 
         return self
 
     @property
     def metric_names(self) -> List[str]:
+        if self.metrics:
+            return list(self.metrics)
         if isinstance(self.metric, str):
             return [self.metric]
-        return list(self.metric)
+        if isinstance(self.metric, list):
+            return list(self.metric)
+        return []
 
     @property
     def direction_names(self) -> List[str]:
+        if self.directions:
+            return list(self.directions)
         if isinstance(self.direction, str):
             return [self.direction]
-        return list(self.direction)
+        if isinstance(self.direction, list):
+            return list(self.direction)
+        return []
 
     @staticmethod
     def _normalise_sequence(value: str | List[str], *, field: str) -> List[str]:
@@ -122,6 +138,54 @@ class SearchConfig(BaseModel):
                 raise ValueError(f"search.{field} must not be empty")
             return list(value)
         raise TypeError(f"search.{field} must be a string or list of strings")
+
+    def _resolve_metric_names(self) -> List[str]:
+        source: str | List[str] | None
+        field = "metric"
+        if self.metrics is not None:
+            source = self.metrics
+            field = "metrics"
+        else:
+            source = self.metric
+        if source is None:
+            raise ValueError("search.metric must be provided")
+        entries = self._normalise_sequence(source, field=field)
+        metrics: List[str] = []
+        for entry in entries:
+            metric_name = entry.strip()
+            if not metric_name:
+                raise ValueError(
+                    f"search.{field} entries must be non-empty strings"
+                )
+            metrics.append(metric_name)
+        return metrics
+
+    def _resolve_direction_names(self, *, expected: int) -> List[str]:
+        source: str | List[str] | None
+        field = "direction"
+        if self.directions is not None:
+            source = self.directions
+            field = "directions"
+        else:
+            source = self.direction
+        if source is None:
+            source = "minimize"
+        entries = self._normalise_sequence(source, field=field)
+        directions: List[str] = []
+        for entry in entries:
+            direction_name = entry.lower().strip()
+            if direction_name not in {"minimize", "maximize"}:
+                raise ValueError(
+                    f"search.{field} entries must be 'minimize' or 'maximize'"
+                )
+            directions.append(direction_name)
+        if len(directions) == 1 and expected > 1:
+            directions = directions * expected
+        if len(directions) != expected:
+            raise ValueError(
+                "search.metric and search.directions must have the same number of entries"
+            )
+        return directions
 
 
 class StoppingConfig(BaseModel):

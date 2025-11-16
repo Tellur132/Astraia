@@ -50,11 +50,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     if library != "optuna":
         raise ValueError(f"Unsupported search library: {library or 'unknown'}")
     search_space = {name: dict(spec) for name, spec in config["search_space"].items()}
-    metric_names = _normalise_objective_names(search_cfg.get("metric"))
-    direction_names = _normalise_direction_names(
-        search_cfg.get("direction", "minimize"),
-        expected=len(metric_names),
-    )
+    metric_names = _collect_search_metrics(search_cfg)
+    direction_names = _collect_search_directions(search_cfg, expected=len(metric_names))
     primary_metric = metric_names[0]
 
     sampler = build_sampler(search_cfg, config.get("seed"))
@@ -279,37 +276,60 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     )
 
 
-def _normalise_objective_names(value: Any) -> List[str]:
+def _collect_search_metrics(search_cfg: Mapping[str, Any]) -> List[str]:
+    metrics_value = search_cfg.get("metrics")
+    if metrics_value is not None:
+        return _normalise_objective_names(metrics_value, field="metrics")
+    if "metric" not in search_cfg:
+        raise ValueError("search.metric must be provided")
+    return _normalise_objective_names(search_cfg.get("metric"), field="metric")
+
+
+def _collect_search_directions(
+    search_cfg: Mapping[str, Any], *, expected: int
+) -> List[str]:
+    if "directions" in search_cfg and search_cfg.get("directions") is not None:
+        return _normalise_direction_names(
+            search_cfg["directions"], expected=expected, field="directions"
+        )
+    return _normalise_direction_names(
+        search_cfg.get("direction", "minimize"), expected=expected, field="direction"
+    )
+
+
+def _normalise_objective_names(value: Any, *, field: str) -> List[str]:
     if isinstance(value, str):
         return [value]
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         names = [str(item) for item in value]
         if not names:
-            raise ValueError("search.metric must not be empty")
+            raise ValueError(f"search.{field} must not be empty")
         return names
-    raise TypeError("search.metric must be a string or sequence of strings")
+    raise TypeError(f"search.{field} must be a string or sequence of strings")
 
 
-def _normalise_direction_names(value: Any, *, expected: int) -> List[str]:
+def _normalise_direction_names(value: Any, *, expected: int, field: str) -> List[str]:
     if isinstance(value, str):
         names = [value]
     elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         names = [str(item) for item in value]
     else:
-        raise TypeError("search.direction must be a string or sequence of strings")
+        raise TypeError(f"search.{field} must be a string or sequence of strings")
 
     if not names:
-        raise ValueError("search.direction must not be empty")
+        raise ValueError(f"search.{field} must not be empty")
     normalised = [name.lower().strip() for name in names]
     for name in normalised:
         if name not in {"minimize", "maximize"}:
-            raise ValueError("search.direction entries must be 'minimize' or 'maximize'")
+            raise ValueError(
+                f"search.{field} entries must be 'minimize' or 'maximize'"
+            )
 
     if len(normalised) == 1 and expected > 1:
         normalised = normalised * expected
 
     if len(normalised) != expected:
-        raise ValueError("search.metric and search.direction must have the same length")
+        raise ValueError("Objective directions must match the number of metrics")
 
     return normalised
 

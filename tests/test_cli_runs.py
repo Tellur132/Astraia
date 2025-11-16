@@ -209,3 +209,17 @@ class RunsCliTests(TestCase):
         self.assertEqual(len(parsed), 2)
         self.assertEqual(parsed[0]["run_id"], handle_a.run_id)
         self.assertIn("metrics", parsed[0])
+
+    def test_summarize_config_includes_objective_details(self) -> None:
+        config = _make_config("summary").model_dump(mode="python")
+        search = config["search"]
+        search["multi_objective"] = True
+        search["metrics"] = ["kl", "depth"]
+        search["directions"] = ["minimize", "maximize"]
+        search.pop("metric", None)
+        search.pop("direction", None)
+
+        summary = cli.summarize_config(config)
+        self.assertIn("Multi-objective", summary)
+        self.assertIn("minimize: kl", summary)
+        self.assertIn("maximize: depth", summary)
