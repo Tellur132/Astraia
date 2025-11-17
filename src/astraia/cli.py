@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -25,6 +26,7 @@ from .tracking import RunMetadata
 from .tracking import list_runs as tracking_list_runs
 from .tracking import load_run as tracking_load_run
 from .tracking import update_run_status
+from .visualization import ObjectiveSpec, VisualizationError, plot_history, plot_pareto_front
 
 if TYPE_CHECKING:
     from .optimization import OptimizationResult
@@ -72,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command")
     _configure_runs_subcommands(subparsers)
+    _configure_visualize_subcommand(subparsers)
     return parser.parse_args()
 
 
@@ -335,6 +338,43 @@ def _configure_runs_subcommands(
     )
 
 
+def _configure_visualize_subcommand(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser] | None,
+) -> None:
+    if subparsers is None:
+        return
+
+    visualize_parser = subparsers.add_parser(
+        "visualize",
+        help="Render quick visualizations for a completed run.",
+        description="Render quick visualizations for a completed run.",
+    )
+    _add_runs_root_argument(visualize_parser)
+    visualize_parser.add_argument("--run-id", required=True, help="Run identifier to visualize.")
+    visualize_parser.add_argument(
+        "--type",
+        choices=("pareto", "history"),
+        default="history",
+        help="Visualization type to render (default: history).",
+    )
+    visualize_parser.add_argument(
+        "--metric",
+        action="append",
+        dest="metrics",
+        metavar="NAME",
+        help="Metric/objective name to include (repeatable).",
+    )
+    visualize_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional output path for the rendered image (default: run directory).",
+    )
+    visualize_parser.add_argument(
+        "--title",
+        help="Optional title override for the generated plot.",
+    )
+
+
 def parse_env_file(path: Path) -> Dict[str, str]:
     """Parse key-value pairs from a dotenv-style file."""
 
@@ -505,6 +545,69 @@ def _ensure_string_list(value: Any) -> list[str]:
     return []
 
 
+def _default_visualization_path(run_dir: Path, viz_type: str) -> Path:
+    name = f"visualization_{viz_type}.png"
+    return run_dir / name
+
+
+def _extract_metric_names_from_config(config: Mapping[str, Any] | None) -> list[str]:
+    if not config:
+        return []
+    search = config.get("search")
+    if not isinstance(search, Mapping):
+        return []
+    metrics = _ensure_string_list(search.get("metrics"))
+    if not metrics:
+        metrics = _ensure_string_list(search.get("metric"))
+    return metrics
+
+
+def _extract_metric_names_from_log(log_path: Path) -> list[str]:
+    if not log_path.exists():
+        return []
+    with log_path.open("r", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return []
+    return [col.replace("metric_", "", 1) for col in header if col.startswith("metric_")]
+
+
+def _build_objective_specs(
+    metric_names: Sequence[str], config: Mapping[str, Any] | None
+) -> list[ObjectiveSpec]:
+    directions = _resolve_visualization_directions(config, metric_names)
+    return [ObjectiveSpec(name=name, direction=directions.get(name, "minimize")) for name in metric_names]
+
+
+def _resolve_visualization_directions(
+    config: Mapping[str, Any] | None, metric_names: Sequence[str]
+) -> Dict[str, str]:
+    directions = {name: "minimize" for name in metric_names}
+    if not config:
+        return directions
+    search = config.get("search")
+    if not isinstance(search, Mapping):
+        return directions
+
+    metric_list = _ensure_string_list(search.get("metrics"))
+    if not metric_list:
+        metric_list = _ensure_string_list(search.get("metric"))
+    direction_list = _ensure_string_list(search.get("directions"))
+    if not direction_list:
+        direction_list = _ensure_string_list(search.get("direction"))
+
+    if metric_list and not direction_list:
+        direction_list = ["minimize"] * len(metric_list)
+    elif len(direction_list) == 1 and len(metric_list) > 1:
+        direction_list = direction_list * len(metric_list)
+
+    for metric, direction in zip(metric_list, direction_list, strict=False):
+        directions[str(metric)] = str(direction).lower()
+    return directions
+
+
 def format_result(result: "OptimizationResult") -> str:
     lines = [
         "Optimization finished.",
@@ -542,6 +645,46 @@ def _handle_runs_command(args: argparse.Namespace) -> None:
         _runs_compare_command(args)
     else:  # pragma: no cover - argparse prevents this path
         raise SystemExit(f"Unknown runs sub-command: {command}")
+
+
+def _handle_visualize_command(args: argparse.Namespace) -> None:
+    metadata = tracking_load_run(args.run_id, runs_root=args.runs_root)
+    log_path = metadata.artifact_path("log") or metadata.run_dir / "log.csv"
+    config = _load_config_artifact(metadata)
+
+    requested_metrics: Sequence[str] = getattr(args, "metrics", []) or []
+    metrics = list(requested_metrics) or _extract_metric_names_from_config(config)
+    if not metrics:
+        metrics = _extract_metric_names_from_log(log_path)
+    if not metrics:
+        raise SystemExit("No metrics found in the run configuration or log file.")
+
+    objectives = _build_objective_specs(metrics, config)
+    title = getattr(args, "title", None)
+    output_path = getattr(args, "output", None)
+    resolved_output = output_path or _default_visualization_path(metadata.run_dir, args.type)
+
+    try:
+        if args.type == "pareto":
+            if len(objectives) < 2:
+                raise SystemExit("Pareto visualizations require at least two metrics.")
+            result_path = plot_pareto_front(
+                log_path,
+                objectives[:2],
+                title=title,
+                output_path=resolved_output,
+            )
+        else:
+            result_path = plot_history(
+                log_path,
+                objectives,
+                title=title,
+                output_path=resolved_output,
+            )
+    except VisualizationError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(f"Visualization written to {result_path}")
 
 
 def _runs_list_command(args: argparse.Namespace) -> None:
@@ -1070,6 +1213,9 @@ def main() -> None:
 
     if getattr(args, "command", None) == "runs":
         _handle_runs_command(args)
+        return
+    if getattr(args, "command", None) == "visualize":
+        _handle_visualize_command(args)
         return
 
     if args.dry_run and (args.as_json or args.summarize):
