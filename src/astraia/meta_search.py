@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import json
+import math
 from typing import (
     Any,
     Callable,
@@ -21,6 +22,12 @@ from typing import (
 import optuna
 
 from .llm_guidance import create_llm_provider
+from .llm_interfaces import (
+    LLMHistoryMetric,
+    LLMObjective,
+    LLMRepresentativePoint,
+    LLMRunContext,
+)
 from .llm_providers import LLMResult, Prompt, PromptMessage, ToolDefinition
 
 
@@ -402,11 +409,25 @@ class MetaSearchAdjuster:
                     continue
                 key = name.lower()
                 stats = summary.setdefault(
-                    key, {"latest": numeric, "min": numeric, "max": numeric}
+                    key,
+                    {
+                        "latest": numeric,
+                        "min": numeric,
+                        "max": numeric,
+                        "total": 0.0,
+                        "count": 0,
+                    },
                 )
                 stats["latest"] = numeric
                 stats["min"] = min(stats["min"], numeric)
                 stats["max"] = max(stats["max"], numeric)
+                stats["total"] += numeric
+                stats["count"] += 1
+        for stats in summary.values():
+            total = stats.pop("total", None)
+            count = stats.get("count")
+            if total is not None and count:
+                stats["mean"] = total / count
         return summary
 
     def _normalise_metrics(self, metrics: Mapping[str, Any]) -> Dict[str, float]:
@@ -544,7 +565,13 @@ class MetaSearchAdjuster:
         *,
         schema: Mapping[str, Any],
     ) -> Prompt:
-        summary = self._summarise_history(best_value, best_params, settings, trials_completed)
+        context = self._build_run_context(
+            best_value=best_value,
+            best_params=best_params,
+            settings=settings,
+            trials_completed=trials_completed,
+        )
+        context_json = context.to_json(indent=2)
         example_payload = {
             "sampler": settings.sampler,
             "rescale": {"param_name": 0.5},
@@ -556,9 +583,8 @@ class MetaSearchAdjuster:
         schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
 
         lines = [
-            "以下は最新の試行サマリです。",
-            "---",
-            summary,
+            "以下は共通フォーマットで提供される最適化状態の JSON です。",
+            context_json,
             "---",
             f"目的: {self._metric_name} を {self._direction.name.lower()}",
             f"次の {self._interval} 試行に向けた探索方針を指示してください。",
@@ -613,43 +639,78 @@ class MetaSearchAdjuster:
             },
         }
 
-    def _summarise_history(
+    def _build_run_context(
         self,
+        *,
         best_value: float | None,
         best_params: Mapping[str, Any],
         settings: SearchSettings,
         trials_completed: int,
-    ) -> str:
-        lines: list[str] = []
-        lines.append(f"現在のサンプラー: {settings.sampler}")
-        lines.append(f"残り試行予算: {max(0, settings.trial_budget - trials_completed)}")
-        if settings.patience is None:
-            lines.append("早期停止: 無効")
-        else:
-            lines.append(f"早期停止許容 (patience): {settings.patience}")
-        if best_value is not None:
-            lines.append(f"ベスト値: {best_value}")
-        if best_params:
-            formatted = ", ".join(f"{k}={v}" for k, v in best_params.items())
-            lines.append(f"ベストパラメタ: {formatted}")
-
-        lines.append("直近試行:")
-        recent = list(self._history)[-self._summary_window :]
-        for record in recent:
-            metric_val = record.metrics.get(self._metric_name)
-            metric_repr = metric_val if metric_val is not None else record.value
-            flag = "*" if record.improved else "-"
-            lines.append(
-                f"  {flag} Trial {record.number}: value={record.value} metric={metric_repr} params={self._short_params(record.params)}"
+    ) -> LLMRunContext:
+        objectives = [
+            LLMObjective(
+                name=self._metric_name,
+                direction=self._direction.name.lower(),
             )
-        return "\n".join(lines)
+        ]
+        current_best: List[LLMRepresentativePoint] = []
+        if best_value is not None or best_params:
+            values: Dict[str, Any] = {}
+            if best_value is not None:
+                values[self._metric_name] = best_value
+            current_best.append(
+                LLMRepresentativePoint(
+                    label="Best primary objective",
+                    trial=self._best_trial_number(best_value),
+                    values=values,
+                    params=dict(best_params),
+                )
+            )
 
-    def _short_params(self, params: Mapping[str, Any]) -> str:
-        items = list(params.items())
-        if len(items) <= 3:
-            return ", ".join(f"{k}={v}" for k, v in items)
-        head = ", ".join(f"{k}={v}" for k, v in items[:3])
-        return f"{head}, ..."
+        metric_summary = self._collect_metric_summary()
+        history_window = min(len(self._history), self._summary_window)
+        history_summary: List[LLMHistoryMetric] = []
+        for name, stats in metric_summary.items():
+            direction = None
+            if name == self._metric_name_lc:
+                direction = self._direction.name.lower()
+            count_value = stats.get("count")
+            history_summary.append(
+                LLMHistoryMetric(
+                    name=name,
+                    direction=direction,
+                    window=history_window or None,
+                    latest=stats.get("latest"),
+                    minimum=stats.get("min"),
+                    maximum=stats.get("max"),
+                    mean=stats.get("mean"),
+                    count=int(count_value) if count_value else None,
+                )
+            )
+
+        remaining_budget = max(0, settings.trial_budget - trials_completed)
+        patience_text = (
+            "disabled" if settings.patience is None else str(settings.patience)
+        )
+        notes = (
+            f"sampler={settings.sampler}, remaining_budget={remaining_budget}, patience={patience_text}"
+        )
+
+        return LLMRunContext(
+            objectives=objectives,
+            current_best=current_best,
+            history_summary=history_summary,
+            trials_completed=trials_completed,
+            notes=notes,
+        )
+
+    def _best_trial_number(self, best_value: float | None) -> int | None:
+        if best_value is None:
+            return None
+        for record in self._history:
+            if math.isclose(record.value, best_value, rel_tol=1e-9, abs_tol=1e-9):
+                return record.number
+        return None
 
     def _parse_plan(
         self,

@@ -6,9 +6,15 @@ import csv
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from .llm_guidance import create_llm_provider
+from .llm_interfaces import (
+    LLMHistoryMetric,
+    LLMObjective,
+    LLMRepresentativePoint,
+    LLMRunContext,
+)
 from .llm_providers import Prompt, ToolDefinition
 
 
@@ -305,6 +311,73 @@ def _normalise_string_list(value: Any) -> List[str]:
     return results
 
 
+def _build_llm_context(
+    *,
+    primary_metric: str,
+    direction: str,
+    best_params: Mapping[str, Any],
+    best_metrics: Mapping[str, Any],
+    trials_completed: int,
+    early_stop_reason: str | None,
+    signals: FailureSignals,
+    series: Sequence[float],
+) -> LLMRunContext:
+    objective = LLMObjective(name=primary_metric, direction=direction.lower())
+    current_best = [
+        LLMRepresentativePoint(
+            label="Best observed metrics",
+            trial=None,
+            values=dict(best_metrics),
+            params=dict(best_params),
+        )
+    ]
+    series_stats = _series_stats(series)
+    history = [
+        LLMHistoryMetric(
+            name=primary_metric,
+            direction=direction.lower(),
+            window=series_stats.get("window"),
+            latest=signals.last_value,
+            minimum=series_stats.get("min"),
+            maximum=series_stats.get("max"),
+            mean=series_stats.get("mean"),
+            count=series_stats.get("count"),
+        )
+    ]
+    notes: List[str] = [
+        f"nan={signals.nan_count}",
+        f"inf={signals.inf_count}",
+        f"stagnation={signals.longest_no_improve}/{signals.trailing_no_improve}",
+    ]
+    if early_stop_reason:
+        notes.append(f"early_stop={early_stop_reason}")
+    notes.append(f"improvements={signals.improvements}")
+
+    return LLMRunContext(
+        objectives=[objective],
+        current_best=current_best,
+        history_summary=history,
+        trials_completed=trials_completed,
+        notes="; ".join(notes),
+    )
+
+
+def _series_stats(series: Sequence[float]) -> Dict[str, float | int | None]:
+    window = len(series)
+    finite = [value for value in series if math.isfinite(value)]
+    if not finite:
+        return {"min": None, "max": None, "mean": None, "count": window or None, "window": window or None}
+    total = sum(finite)
+    count = len(finite)
+    return {
+        "min": min(finite),
+        "max": max(finite),
+        "mean": total / count if count else None,
+        "count": count,
+        "window": window or None,
+    }
+
+
 def _format_structured_sections(
     diagnosis: List[str], recommendations: List[str]
 ) -> List[str]:
@@ -332,6 +405,18 @@ def _build_prompt(
     name = metadata.get("name", "unknown")
     description = metadata.get("description", "")
     recent_values = ", ".join(f"{value:.4g}" for value in series[-8:]) if series else "(no data)"
+
+    context = _build_llm_context(
+        primary_metric=primary_metric,
+        direction=direction,
+        best_params=best_params,
+        best_metrics=best_metrics,
+        trials_completed=trials_completed,
+        early_stop_reason=early_stop_reason,
+        signals=signals,
+        series=series,
+    )
+    context_json = context.to_json(indent=2)
 
     summary_lines = [
         f"試行数: {trials_completed}",
@@ -361,7 +446,9 @@ def _build_prompt(
         f"{preamble}実験名: {name}\n"
         f"説明: {description}\n"
         f"主指標: {primary_metric} ({direction})\n"
-        "---\n"
+        "最適化状態JSON:\n"
+        + context_json
+        + "\n---\n"
         "失敗シグナル概要:\n"
         + "\n".join(f"- {line}" for line in summary_lines)
         + "\n---\n"
