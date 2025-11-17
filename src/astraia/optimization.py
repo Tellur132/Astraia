@@ -1359,13 +1359,14 @@ def build_report(
     critic_section = generate_llm_critique(
         config=config,
         metadata=config.get("metadata", {}),
-        primary_metric=metric_names[0],
-        direction=direction_names[0],
+        metric_names=metric_names,
+        direction_names=direction_names,
         best_params=best_params,
         best_metrics=best_metrics,
         trials_completed=trials_completed,
         early_stop_reason=early_stop_reason,
         log_path=log_path,
+        pareto_summary=pareto_summary,
     )
     if critic_section:
         lines.extend(["", "## LLM考察", ""])
