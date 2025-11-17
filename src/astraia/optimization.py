@@ -19,11 +19,13 @@ from optuna.trial import TrialState
 from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
 from .llm_guidance import create_proposal_generator
 from .llm_critic import generate_llm_critique
+from .llm_interfaces import LLMObjective, LLMRepresentativePoint, LLMRunContext
 from .meta_search import (
     SearchSettings,
     apply_meta_adjustment,
     create_meta_search_adjuster,
 )
+from .planner import create_planner_agent
 
 
 @dataclass
@@ -73,13 +75,22 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         patience=int(patience_value) if patience_value is not None else None,
     )
 
+    candidate_llm_override = _resolve_candidate_llm_cfg(config.get("planner"))
+
     proposal_generator = create_proposal_generator(
         config.get("llm_guidance"),
         config.get("llm"),
         search_space,
         seed=seed,
+        preferred_llm_cfg=candidate_llm_override,
     )
     pending_proposals: deque[Dict[str, Any]] = deque()
+
+    planner_agent = create_planner_agent(
+        config.get("planner"),
+        config.get("llm"),
+        search_space=search_space,
+    )
 
     log_file = Path(config.get("artifacts", {}).get("log_file", "runs/log.csv"))
 
@@ -92,6 +103,14 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
 
     study_directions = study.directions
     primary_direction = study_directions[0]
+
+    llm_context = _build_llm_context(
+        metric_names=metric_names,
+        directions=direction_names,
+        best_params=best_params,
+        best_metrics=best_metrics,
+        trials_completed=0,
+    )
 
     with TrialLogger(
         log_file,
@@ -118,10 +137,16 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     break
 
             if proposal_generator is not None:
+                proposal_generator.update_context(llm_context)
                 while not pending_proposals:
                     remaining = max_trials - trials_completed
                     if remaining <= 0:
                         break
+                    if planner_agent is not None:
+                        strategy = planner_agent.generate_strategy(llm_context)
+                        proposal_generator.update_strategy(strategy.to_payload())
+                    else:
+                        proposal_generator.update_strategy(None)
                     batch = proposal_generator.propose_batch(remaining)
                     if not batch:
                         break
@@ -213,6 +238,14 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     )
                     if messages:
                         print(f"[meta:{adjustment.source}] " + " | ".join(messages))
+
+            llm_context = _build_llm_context(
+                metric_names=metric_names,
+                directions=direction_names,
+                best_params=best_params,
+                best_metrics=best_metrics,
+                trials_completed=trials_completed,
+            )
 
             if (
                 settings.patience is not None
@@ -821,6 +854,62 @@ def _approximate_hypervolume(
         volume *= span
 
     return volume * dominated / samples
+
+
+def _resolve_candidate_llm_cfg(
+    planner_cfg: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if not isinstance(planner_cfg, Mapping):
+        return None
+    roles = planner_cfg.get("roles")
+    if not isinstance(roles, Mapping):
+        return None
+    candidate_entry = roles.get("candidate")
+    if not isinstance(candidate_entry, Mapping):
+        return None
+    candidate_llm = candidate_entry.get("llm")
+    if isinstance(candidate_llm, Mapping):
+        return candidate_llm
+    return None
+
+
+def _build_llm_context(
+    *,
+    metric_names: Sequence[str],
+    directions: Sequence[str],
+    best_params: Mapping[str, Any],
+    best_metrics: Mapping[str, MetricValue],
+    trials_completed: int,
+) -> LLMRunContext:
+    objectives: list[LLMObjective] = []
+    for idx, name in enumerate(metric_names):
+        direction = directions[idx] if idx < len(directions) else None
+        objectives.append(LLMObjective(name=name, direction=direction))
+    if not objectives:
+        objectives.append(LLMObjective(name="primary_objective"))
+
+    current_best: list[LLMRepresentativePoint] = []
+    if best_metrics:
+        values = {
+            metric: best_metrics.get(metric)
+            for metric in metric_names
+            if metric in best_metrics
+        }
+        current_best.append(
+            LLMRepresentativePoint(
+                label="best",
+                trial=None,
+                values=values,
+                params=dict(best_params),
+                metrics=dict(best_metrics),
+            )
+        )
+
+    return LLMRunContext(
+        objectives=objectives,
+        current_best=current_best,
+        trials_completed=trials_completed or None,
+    )
 
 
 def _trial_failed(metrics: Mapping[str, MetricValue]) -> bool:

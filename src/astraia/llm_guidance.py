@@ -278,6 +278,7 @@ class LLMProposalGenerator:
         self._tool_cache: dict[int, ToolDefinition] = {}
         self._seen_hashes: set[str] = set()
         self._context: LLMRunContext | None = None
+        self._strategy_payload: Dict[str, Any] | None = None
 
     @property
     def batch_size(self) -> int:
@@ -337,6 +338,11 @@ class LLMProposalGenerator:
 
         self._context = context
 
+    def update_strategy(self, strategy: Mapping[str, Any] | None) -> None:
+        """Attach the latest planner directives for prompt construction."""
+
+        self._strategy_payload = dict(strategy) if strategy is not None else None
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -347,8 +353,9 @@ class LLMProposalGenerator:
     def _cache_key(self, count: int) -> str:
         signature = json.dumps(self._search_space, sort_keys=True, ensure_ascii=False)
         context_hash = self._current_context().fingerprint()
+        strategy_hash = self._strategy_hash()
         return (
-            f"{count}::{self._problem_summary}::{self._objective}::{signature}::{context_hash}"
+            f"{count}::{self._problem_summary}::{self._objective}::{signature}::{context_hash}::{strategy_hash}"
         )
 
     def _build_prompt(self, count: int) -> Prompt:
@@ -357,14 +364,27 @@ class LLMProposalGenerator:
             "最適化状態 (objectives/current_best/history_summary) の共通JSON:",
             context_json,
             "",
-            "問題概要:",
-            self._problem_summary,
-            "",
-            "目的:",
-            self._objective,
-            "",
-            "探索空間の制約:",
         ]
+        if self._strategy_payload is not None:
+            strategy_json = json.dumps(
+                self._strategy_payload, ensure_ascii=False, indent=2
+            )
+            lines.extend([
+                "プランナーからのバッチ指示:",
+                strategy_json,
+                "",
+            ])
+        lines.extend(
+            [
+                "問題概要:",
+                self._problem_summary,
+                "",
+                "目的:",
+                self._objective,
+                "",
+                "探索空間の制約:",
+            ]
+        )
         for name, spec in self._search_space.items():
             lines.append(self._describe_parameter(name, spec))
 
@@ -397,6 +417,12 @@ class LLMProposalGenerator:
 
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
+
+    def _strategy_hash(self) -> str:
+        if self._strategy_payload is None:
+            return "no-strategy"
+        canonical = json.dumps(self._strategy_payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _current_context(self) -> LLMRunContext:
         if self._context is not None:
@@ -727,6 +753,7 @@ def create_proposal_generator(
     search_space: Mapping[str, Mapping[str, Any]],
     *,
     seed: int | None,
+    preferred_llm_cfg: Mapping[str, Any] | None = None,
 ) -> LLMProposalGenerator | None:
     """Create an :class:`LLMProposalGenerator` if guidance is enabled."""
 
@@ -740,7 +767,8 @@ def create_proposal_generator(
     base_temperature = float(guidance_cfg.get("base_temperature", 0.7))
     min_temperature = float(guidance_cfg.get("min_temperature", 0.1))
 
-    provider, usage_logger = create_llm_provider(llm_cfg)
+    effective_llm_cfg = preferred_llm_cfg or llm_cfg
+    provider, usage_logger = create_llm_provider(effective_llm_cfg)
 
     return LLMProposalGenerator(
         search_space=search_space,

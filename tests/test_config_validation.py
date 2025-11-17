@@ -118,6 +118,22 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             OptimizationConfig.model_validate(data)
 
+    def test_llm_planner_accepts_roles_definition(self) -> None:
+        data = make_base_config()
+        data["llm"] = {"provider": "openai", "model": "gpt-4o"}
+        data["planner"] = {
+            "backend": "llm",
+            "enabled": True,
+            "roles": {
+                "planner": {
+                    "prompt_template": "use context",
+                }
+            },
+        }
+        config = OptimizationConfig.model_validate(data)
+        assert config.planner is not None
+        self.assertTrue(config.planner.enabled)
+
     def test_llm_usage_log_defaults_to_run_root(self) -> None:
         data = make_base_config()
         data["artifacts"] = {"run_root": "runs/demo"}
@@ -135,6 +151,25 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         }
         with self.assertRaises(ValidationError):
             OptimizationConfig.model_validate(data)
+
+    def test_llm_guidance_allows_candidate_specific_llm(self) -> None:
+        data = make_base_config()
+        data["llm_guidance"] = {
+            "enabled": True,
+            "problem_summary": "demo",
+            "objective": "minimize",
+        }
+        data["planner"] = {
+            "backend": "rule",
+            "enabled": True,
+            "roles": {
+                "candidate": {
+                    "llm": {"provider": "openai", "model": "gpt-4o-mini"}
+                }
+            },
+        }
+        config = OptimizationConfig.model_validate(data)
+        assert config.planner is not None
 
     def test_llm_guidance_requires_problem_and_objective(self) -> None:
         data = make_base_config()
