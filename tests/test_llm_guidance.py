@@ -116,3 +116,13 @@ def test_out_of_bounds_triggers_retry(tmp_path: Path) -> None:
     assert stub.temperatures[1] <= stub.temperatures[0]
     assert stub.temperatures[1] >= 0.2
 
+
+def test_strategy_updates_cache_key(tmp_path: Path) -> None:
+    payload = {"proposals": [{"theta": 0.1, "depth": 1, "backend": "a"}, {"theta": -0.1, "depth": 2, "backend": "b"}]}
+    generator = make_generator([result_from_payload(payload)], tmp_path=tmp_path)
+
+    initial_key = generator._cache_key(2)
+    generator.update_strategy({"emphasis": "kl"})
+    updated_key = generator._cache_key(2)
+    assert initial_key != updated_key
+

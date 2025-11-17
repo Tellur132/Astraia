@@ -219,42 +219,6 @@ class StoppingConfig(BaseModel):
         return self
 
 
-class PlannerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    backend: str = "rule"
-    enabled: bool = False
-    role: str | None = None
-    prompt_template: str | None = None
-    config_path: str | None = None
-
-    @model_validator(mode="after")
-    def validate_strings(self) -> "PlannerConfig":
-        self.backend = self.backend.lower().strip()
-        if self.backend not in {"rule", "llm"}:
-            raise ValueError("planner.backend must be 'rule' or 'llm'")
-
-        if self.config_path is not None and not self.config_path.strip():
-            raise ValueError("planner.config_path must be a non-empty string when provided")
-
-        if self.backend == "llm":
-            if not (self.role and self.role.strip()):
-                raise ValueError("planner.role must be a non-empty string for llm backend")
-            if not (self.prompt_template and self.prompt_template.strip()):
-                raise ValueError(
-                    "planner.prompt_template must be a non-empty string for llm backend"
-                )
-        else:
-            if self.role is not None and not self.role.strip():
-                raise ValueError("planner.role must be a non-empty string when provided")
-            if self.prompt_template is not None and not self.prompt_template.strip():
-                raise ValueError(
-                    "planner.prompt_template must be a non-empty string when provided"
-                )
-
-        return self
-
-
 class ReportConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -416,6 +380,77 @@ class LLMConfig(BaseModel):
             if self.prompt_cost_per_1k is None or self.completion_cost_per_1k is None:
                 raise ValueError(
                     "llm.prompt_cost_per_1k and llm.completion_cost_per_1k are required when budget_usd is set"
+                )
+
+        return self
+
+
+class PlannerRoleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_template: str | None = None
+    llm: LLMConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "PlannerRoleConfig":
+        if self.prompt_template is not None:
+            template = self.prompt_template.strip()
+            if not template:
+                raise ValueError(
+                    "planner.roles entries must define a non-empty prompt_template when provided"
+                )
+            self.prompt_template = template
+        return self
+
+
+class PlannerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str = "rule"
+    enabled: bool = False
+    role: str | None = None
+    prompt_template: str | None = None
+    config_path: str | None = None
+    roles: Dict[str, PlannerRoleConfig] | None = None
+
+    @model_validator(mode="after")
+    def validate_strings(self) -> "PlannerConfig":
+        self.backend = self.backend.lower().strip()
+        if self.backend not in {"rule", "llm"}:
+            raise ValueError("planner.backend must be 'rule' or 'llm'")
+
+        if self.config_path is not None and not self.config_path.strip():
+            raise ValueError("planner.config_path must be a non-empty string when provided")
+
+        if self.roles is not None:
+            cleaned: Dict[str, PlannerRoleConfig] = {}
+            for name, cfg in self.roles.items():
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("planner.roles keys must be non-empty strings")
+                cleaned[name.strip()] = cfg
+            self.roles = cleaned
+
+        if self.backend == "llm":
+            has_named_roles = bool(self.roles)
+            has_primary_role = bool(self.role and self.role.strip())
+            if not (has_named_roles or has_primary_role):
+                raise ValueError(
+                    "planner.role or planner.roles must be provided for llm backend"
+                )
+            if has_primary_role:
+                role_name = self.role.strip()
+                self.role = role_name
+                if not (self.prompt_template and self.prompt_template.strip()):
+                    raise ValueError(
+                        "planner.prompt_template must be a non-empty string for llm backend"
+                    )
+                self.prompt_template = self.prompt_template.strip()
+        else:
+            if self.role is not None and not self.role.strip():
+                raise ValueError("planner.role must be a non-empty string when provided")
+            if self.prompt_template is not None and not self.prompt_template.strip():
+                raise ValueError(
+                    "planner.prompt_template must be a non-empty string when provided"
                 )
 
         return self
@@ -713,7 +748,18 @@ class OptimizationConfig(BaseModel):
                 usage_path = Path(run_root) / "llm_usage.csv"
                 self.llm.usage_log = str(usage_path)
 
-        if self.llm_guidance is not None and self.llm_guidance.enabled and self.llm is None:
+        candidate_override_available = False
+        if self.planner is not None and self.planner.roles is not None:
+            candidate_role = self.planner.roles.get("candidate")
+            if candidate_role is not None and candidate_role.llm is not None:
+                candidate_override_available = True
+
+        if (
+            self.llm_guidance is not None
+            and self.llm_guidance.enabled
+            and self.llm is None
+            and not candidate_override_available
+        ):
             raise ValueError("llm_guidance requires llm configuration when enabled")
 
         if self.llm_critic is not None and self.llm_critic.enabled and self.llm is None:

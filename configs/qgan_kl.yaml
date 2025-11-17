@@ -18,6 +18,11 @@ planner:
   role: planner
   prompt_template: planner_prompts/qgan_kl_minimal.txt
   enabled: false    # LLMプランナー有効化フラグ
+  roles:
+    planner:
+      prompt_template: planner_prompts/qgan_kl_minimal.txt
+    candidate:
+      llm: null
 llm_guidance:
   enabled: true   # LLMガイダンス有効化フラグ
   problem_summary: qGAN KL 発散の最小実験
