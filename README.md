@@ -92,6 +92,14 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 
 `astraia visualize` を実行すると `log_history.png` や `log_pareto.png` が同ディレクトリに生成されます。`--output` を指定すれば任意のパスに保存できます。
 
+### LLM 向け evaluator / config テンプレート
+
+LLM が evaluator や YAML 設定を自動生成する際に参考にできるテンプレートを追加しました。
+
+- `src/astraia/evaluators/llm_template.py`: 4 ステップに分けてコメントした `SimpleWaveEvaluator` と `create_evaluator` ファクトリ。`params` から値を取得 → 目的関数を計算 → 再現可能なノイズを付与 → dict で返す、という流れを LLM がそのまま真似できます。
+- `configs/examples/llm_template.yaml`: 各項目の冒頭に 1 文コメントを添えたアノテーション付き設定例。`planner`/`llm_guidance`/`meta_search`/`llm_critic` を含め、必要なセクションをコメントごとコピペして調整できます。
+- `docs/llm_evaluator_config_examples.md`: 上記 2 ファイルの解説と CLI での確認方法（`--summarize` など）をまとめたガイド。
+
 ## CLI リファレンス
 
 ### 基本オプション

@@ -1,0 +1,98 @@
+# configs/examples/llm_template.yaml
+# LLM が evaluator や設定を自動生成する時に参照できる、各項目へ1文の解説を付けたサンプル。
+
+# metadata: 実験 ID と説明文を記録し、CLI の一覧表示にも利用されます。
+metadata:
+  name: llm_template_demo
+  description: "LLM フレンドリな evaluator/config テンプレートの実行例。"
+
+# seed: 乱数シードを固定して探索や evaluator の擬似乱数を再現しやすくします。
+seed: 2024
+
+# search: Optuna での探索方法（サンプラー、評価回数、最適化方向など）をまとめます。
+search:
+  library: optuna            # 現状サポートしている探索ライブラリ名。
+  sampler: tpe               # 候補生成アルゴリズム（"tpe" や "random" など）。
+  n_trials: 24               # 実行するトライアル数。
+  direction: minimize        # 目的指標 score を最小化。
+  metric: score              # evaluator が返す主要メトリクス名。
+  study_name: llm_template_demo  # Optuna の study 名（省略可）。
+
+# stopping: 実験をどこで止めるか（試行回数・経過時間・改善が途絶えた回数）を定義します。
+stopping:
+  max_trials: 24             # search.n_trials と揃えておくとシンプル。
+  max_time_minutes: 5        # 分単位の上限時間。制限しないなら null。
+  no_improve_patience: 8     # 一定回数改善しなければ早期停止。
+
+# search_space: それぞれのパラメタ型と範囲を YAML で宣言し、Optuna に伝えます。
+search_space:
+  amplitude:                 # 実数パラメタの例。
+    type: float
+    low: 0.1
+    high: 3.0
+    log: false
+  frequency:                 # 実数パラメタ（コメントで用途を示すと LLM も理解しやすい）。
+    type: float
+    low: 0.5
+    high: 4.0
+  phase:                     # 位相のような角度パラメタ。単位はラジアン。
+    type: float
+    low: 0.0
+    high: 6.283
+  depth:                     # 離散パラメタの例。
+    type: int
+    low: 1
+    high: 6
+
+# evaluator: import 先と callable 名を指定し、必要ならキーワード引数を記述します。
+evaluator:
+  module: astraia.evaluators.llm_template   # 例としてこのリポジトリに含めたテンプレートを指す。
+  callable: create_evaluator                # config を受け取り evaluator を返すファクトリ。
+  response_noise: 0.01                     # ファクトリに渡る任意の追加パラメタ。
+
+# report: Markdown/CSV レポートの出力先や掲載メトリクスを制御します。
+report:
+  output_dir: reports
+  filename: llm_template_demo.md
+  metrics:
+    - score
+    - amplitude
+    - frequency
+    - phase
+    - depth
+
+# artifacts: ログ CSV や run ディレクトリのルートを決め、出力先をひとまとめにします。
+artifacts:
+  run_root: runs/llm_template_demo
+  log_file: runs/llm_template_demo/log.csv
+
+# planner: ルールベース or LLM プランナーの設定。ここでは無効化したルールプランナー例を載せています。
+planner:
+  backend: rule
+  enabled: false
+
+# llm: OpenAI/Gemini などの LLM バックエンドを使う場合の共通設定です（API キーは .env に入れます）。
+llm:
+  provider: openai
+  model: gpt-4.1-mini
+  usage_log: runs/llm_template_demo/llm_usage.csv
+
+# llm_guidance: LLM に候補生成を依頼する場合の設定。enabled=false でも文章を入れておくとプロンプト生成の参考になります。
+llm_guidance:
+  enabled: false
+  problem_summary: "サイン波パラメタの擬似最適化問題"
+  objective: "score を下げるための amplitude/frequency/phase の組を提案"
+  n_proposals: 3
+  max_retries: 2
+  base_temperature: 0.7
+  min_temperature: 0.3
+
+# meta_search: 定期的に履歴を要約して探索戦略を見直す仕組み。ここではオフにしています。
+meta_search:
+  enabled: false
+  interval: 6
+  summary_trials: 6
+
+# llm_critic: 実験終了後に LLM へログ解析を依頼する設定。API コストを抑えるなら false のままで OK。
+llm_critic:
+  enabled: false
