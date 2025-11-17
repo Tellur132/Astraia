@@ -5,6 +5,7 @@ src/astraia/cli.py
 src/astraia/config.py
 src/astraia/llm_critic.py
 src/astraia/llm_guidance.py
+src/astraia/pareto_summary.py
 src/astraia/meta_search.py
 src/astraia/optimization.py
 src/astraia.egg-info/PKG-INFO
@@ -29,4 +30,5 @@ tests/test_llm_critic.py
 tests/test_llm_guidance.py
 tests/test_llm_usage.py
 tests/test_meta_search.py
+tests/test_pareto_summary.py
 tests/test_qgan_evaluator.py

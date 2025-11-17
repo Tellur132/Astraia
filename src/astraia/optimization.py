@@ -125,6 +125,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
             config.get("llm"),
             direction=primary_direction,
             metric_name=primary_metric,
+            metric_names=metric_names,
+            directions=study_directions,
             search_space=search_space,
             seed=seed,
         )
