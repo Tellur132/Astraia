@@ -10,6 +10,7 @@ import random
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 import warnings
 
+from .llm_interfaces import LLMObjective, LLMRunContext
 from .llm_providers import (
     LLMResult,
     LLMUsage,
@@ -276,6 +277,7 @@ class LLMProposalGenerator:
         self._schema_cache: dict[int, Dict[str, Any]] = {}
         self._tool_cache: dict[int, ToolDefinition] = {}
         self._seen_hashes: set[str] = set()
+        self._context: LLMRunContext | None = None
 
     @property
     def batch_size(self) -> int:
@@ -330,6 +332,11 @@ class LLMProposalGenerator:
 
         return self._random_unique_batch(count)
 
+    def update_context(self, context: LLMRunContext | None) -> None:
+        """Attach the latest shared optimization context for prompt construction."""
+
+        self._context = context
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -339,10 +346,17 @@ class LLMProposalGenerator:
 
     def _cache_key(self, count: int) -> str:
         signature = json.dumps(self._search_space, sort_keys=True, ensure_ascii=False)
-        return f"{count}::{self._problem_summary}::{self._objective}::{signature}"
+        context_hash = self._current_context().fingerprint()
+        return (
+            f"{count}::{self._problem_summary}::{self._objective}::{signature}::{context_hash}"
+        )
 
     def _build_prompt(self, count: int) -> Prompt:
+        context_json = self._current_context().to_json(indent=2)
         lines = [
+            "最適化状態 (objectives/current_best/history_summary) の共通JSON:",
+            context_json,
+            "",
             "問題概要:",
             self._problem_summary,
             "",
@@ -383,6 +397,18 @@ class LLMProposalGenerator:
 
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
+
+    def _current_context(self) -> LLMRunContext:
+        if self._context is not None:
+            return self._context
+        return LLMRunContext(
+            objectives=[
+                LLMObjective(
+                    name=self._objective or "primary_objective",
+                    direction=None,
+                )
+            ]
+        )
 
     def _proposal_tool(self, count: int) -> ToolDefinition:
         tool = self._tool_cache.get(count)
