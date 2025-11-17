@@ -271,6 +271,19 @@ def _configure_runs_subcommands(
         metavar="KEY=VALUE",
         help="Arbitrary extra key/value pairs stored alongside the status.",
     )
+    status_parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Attach comparison tags such as multi_objective or objectives (repeatable).",
+    )
+    status_parser.add_argument(
+        "--pareto-summary",
+        type=Path,
+        metavar="PATH",
+        help="Path to a JSON document describing the Pareto front overview.",
+    )
 
     diff_parser = runs_subparsers.add_parser(
         "diff",
@@ -612,6 +625,11 @@ def _runs_delete_command(args: argparse.Namespace) -> None:
 
 
 def _runs_status_command(args: argparse.Namespace) -> None:
+    metadata = tracking_load_run(args.run_id, runs_root=args.runs_root)
+    comparison_path = metadata.run_dir / "comparison_summary.json"
+    existing_comparison = _load_comparison_summary(comparison_path)
+    artifacts: Dict[str, str] = {"comparison_summary": str(comparison_path)}
+
     payload: Dict[str, Any] = _parse_key_value_pairs(
         getattr(args, "payload", []) or [],
         flag="--payload",
@@ -622,21 +640,99 @@ def _runs_status_command(args: argparse.Namespace) -> None:
     )
     if metrics:
         payload["metrics"] = metrics
+    tags = _parse_key_value_pairs(
+        getattr(args, "tag", []) or [],
+        flag="--tag",
+    )
+    if tags:
+        payload["tags"] = tags
     if getattr(args, "note", None):
         payload["note"] = args.note
     if getattr(args, "best_value", None) is not None:
         payload["best_value"] = args.best_value
 
+    pareto_summary_path: Path | None = getattr(args, "pareto_summary", None)
+    pareto_payload: Any | None = None
+    if pareto_summary_path is not None:
+        pareto_payload = _load_json_document(pareto_summary_path)
+
     updated = update_run_status(
         args.run_id,
         args.state,
         runs_root=args.runs_root,
+        artifacts=artifacts,
         **payload,
+    )
+    _write_comparison_summary(
+        comparison_path,
+        updated,
+        pareto_summary=pareto_payload,
+        existing=existing_comparison,
     )
     print(f"Run '{updated.run_id}' status updated to {updated.status}.")
 
 
 _MISSING = object()
+
+
+def _load_json_document(path: Path) -> Any:
+    if not path.exists():
+        raise SystemExit(f"Pareto summary file not found: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except json.JSONDecodeError as exc:  # pragma: no cover - exercised via CLI tests
+        raise SystemExit(f"Failed to parse JSON from {path}: {exc}") from exc
+
+
+def _load_comparison_summary(path: Path) -> Mapping[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, Mapping):
+        return data
+    return None
+
+
+def _write_comparison_summary(
+    path: Path,
+    metadata: "RunMetadata",
+    *,
+    pareto_summary: Any | None,
+    existing: Mapping[str, Any] | None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tags_payload = metadata.status_payload.get("tags")
+    tags: Any
+    if isinstance(tags_payload, Mapping):
+        tags = dict(tags_payload)
+    else:
+        tags = tags_payload
+    metrics_payload = metadata.status_payload.get("metrics")
+    metrics: Any
+    if isinstance(metrics_payload, Mapping):
+        metrics = dict(metrics_payload)
+    else:
+        metrics = metrics_payload
+    summary: Dict[str, Any] = {
+        "run_id": metadata.run_id,
+        "state": metadata.status,
+        "best_value": metadata.status_payload.get("best_value"),
+        "metrics": metrics,
+        "tags": tags,
+        "updated_at": metadata.status_updated_at.isoformat()
+        if metadata.status_updated_at
+        else None,
+    }
+    previous_summary = existing.get("pareto_summary") if existing else None
+    final_pareto_summary = pareto_summary if pareto_summary is not None else previous_summary
+    if final_pareto_summary is not None:
+        summary["pareto_summary"] = final_pareto_summary
+    path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _runs_diff_command(args: argparse.Namespace) -> None:
@@ -823,20 +919,26 @@ def _parse_key_value_pairs(items: Sequence[str], *, flag: str) -> Dict[str, Any]
 
 
 def _coerce_scalar(value: str) -> Any:
-    lowered = value.lower()
+    stripped = value.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+    lowered = stripped.lower()
     if lowered in {"true", "false"}:
         return lowered == "true"
     if lowered in {"null", "none"}:
         return None
     try:
-        return int(value)
+        return int(stripped)
     except ValueError:
         pass
     try:
-        return float(value)
+        return float(stripped)
     except ValueError:
         pass
-    return value
+    return stripped
 
 
 def _sort_runs(

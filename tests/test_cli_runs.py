@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from astraia import cli
 from astraia.config import OptimizationConfig
-from astraia.tracking import create_run
+from astraia.tracking import create_run, load_run
 
 
 def _make_config(name: str) -> OptimizationConfig:
@@ -106,6 +106,50 @@ class RunsCliTests(TestCase):
         parsed = json.loads(json_output)
         self.assertEqual(parsed[0]["run_id"], run_id)
         self.assertEqual(parsed[0]["status"], "completed")
+
+    def test_runs_status_supports_tags_and_pareto_summary(self) -> None:
+        run_id = self._create_run("alpha-pareto")
+        pareto_path = Path(self._tmp.name) / "pareto.json"
+        pareto_payload = {
+            "objectives": ["kl", "depth"],
+            "points": [
+                {"kl": 0.1, "depth": 0.9},
+                {"kl": 0.2, "depth": 0.8},
+            ],
+        }
+        pareto_path.write_text(json.dumps(pareto_payload), encoding="utf-8")
+
+        self._invoke(
+            "runs",
+            "status",
+            "--run-id",
+            run_id,
+            "--state",
+            "completed",
+            "--best-value",
+            "0.123",
+            "--metric",
+            "kl=0.123",
+            "--tag",
+            "multi_objective=true",
+            "--tag",
+            'objectives=["kl","depth"]',
+            "--pareto-summary",
+            str(pareto_path),
+            "--runs-root",
+            str(self.runs_root),
+        )
+
+        metadata = load_run(run_id, runs_root=self.runs_root)
+        tags = metadata.status_payload.get("tags") or {}
+        self.assertTrue(tags.get("multi_objective"))
+        self.assertEqual(tags.get("objectives"), ["kl", "depth"])
+
+        comparison_path = metadata.run_dir / "comparison_summary.json"
+        self.assertTrue(comparison_path.exists())
+        comparison_payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+        self.assertEqual(comparison_payload["best_value"], 0.123)
+        self.assertEqual(comparison_payload["pareto_summary"], pareto_payload)
 
     def test_runs_show_as_json(self) -> None:
         run_id = self._create_run("beta")
