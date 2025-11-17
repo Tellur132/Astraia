@@ -87,6 +87,7 @@ def update_run_status(
     status: str,
     *,
     runs_root: Path | None = None,
+    artifacts: Mapping[str, Any] | None = None,
     **payload: Any,
 ) -> RunMetadata:
     """Update the run status information stored in ``meta.json``."""
@@ -98,6 +99,16 @@ def update_run_status(
     new_status["state"] = status
     new_status["updated_at"] = datetime.now(timezone.utc).isoformat()
     meta_data["status"] = new_status
+
+    if artifacts:
+        existing_artifacts = meta_data.get("artifacts")
+        merged = dict(existing_artifacts) if isinstance(existing_artifacts, Mapping) else {}
+        for key, value in artifacts.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        meta_data["artifacts"] = merged
 
     metadata.meta_path.write_text(
         json.dumps(meta_data, indent=2, ensure_ascii=False),
