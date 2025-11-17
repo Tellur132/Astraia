@@ -88,6 +88,7 @@ class LLMRunContext:
     objectives: List[LLMObjective]
     current_best: List[LLMRepresentativePoint] = field(default_factory=list)
     history_summary: List[LLMHistoryMetric] = field(default_factory=list)
+    history_notes: List[str] = field(default_factory=list)
     trials_completed: int | None = None
     notes: str | None = None
 
@@ -97,6 +98,8 @@ class LLMRunContext:
             "current_best": [entry.to_payload() for entry in self.current_best],
             "history_summary": [entry.to_payload() for entry in self.history_summary],
         }
+        if self.history_notes:
+            payload["history_notes"] = list(self.history_notes)
         if self.trials_completed is not None:
             payload["trials_completed"] = self.trials_completed
         if self.notes:

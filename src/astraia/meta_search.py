@@ -28,6 +28,7 @@ from .llm_interfaces import (
     LLMRepresentativePoint,
     LLMRunContext,
 )
+from .pareto_summary import ParetoSummaryGenerator
 from .llm_providers import LLMResult, Prompt, PromptMessage, ToolDefinition
 
 
@@ -151,6 +152,8 @@ class MetaSearchAdjuster:
         llm_cfg: Mapping[str, Any] | None,
         seed: int | None,
         policies: Sequence[Mapping[str, Any]] | None = None,
+        objectives: Sequence[str] | None = None,
+        objective_directions: Sequence[optuna.study.StudyDirection] | None = None,
     ) -> None:
         if interval <= 0:
             raise ValueError("interval must be positive")
@@ -168,6 +171,24 @@ class MetaSearchAdjuster:
         self._provider, self._usage_logger = create_llm_provider(llm_cfg)
         self._seed = seed
         self._policies = self._build_policies(policies or [])
+        if objectives is None:
+            objectives = [metric_name]
+        if objective_directions is None:
+            objective_directions = [direction]
+        if len(objectives) != len(objective_directions):
+            raise ValueError("objectives and objective_directions length mismatch")
+        self._objective_names = list(objectives)
+        self._objective_directions = list(objective_directions)
+        self._objective_direction_map = {
+            name.lower(): objective_directions[idx]
+            for idx, name in enumerate(self._objective_names)
+        }
+        if len(self._objective_names) >= 2:
+            self._pareto_summary = ParetoSummaryGenerator(
+                self._objective_names, self._objective_directions
+            )
+        else:
+            self._pareto_summary = None
 
     def register_trial(
         self,
@@ -648,12 +669,18 @@ class MetaSearchAdjuster:
         trials_completed: int,
     ) -> LLMRunContext:
         objectives = [
-            LLMObjective(
-                name=self._metric_name,
-                direction=self._direction.name.lower(),
-            )
+            LLMObjective(name=name, direction=direction.name.lower())
+            for name, direction in zip(self._objective_names, self._objective_directions)
         ]
         current_best: List[LLMRepresentativePoint] = []
+        history_notes: List[str] = []
+        if self._pareto_summary is not None:
+            pareto_points, pareto_notes = self._pareto_summary.summarise(
+                list(self._history)
+            )
+            if pareto_points:
+                current_best.extend(pareto_points)
+            history_notes.extend(pareto_notes)
         if best_value is not None or best_params:
             values: Dict[str, Any] = {}
             if best_value is not None:
@@ -672,8 +699,9 @@ class MetaSearchAdjuster:
         history_summary: List[LLMHistoryMetric] = []
         for name, stats in metric_summary.items():
             direction = None
-            if name == self._metric_name_lc:
-                direction = self._direction.name.lower()
+            mapped_direction = self._objective_direction_map.get(name)
+            if mapped_direction is not None:
+                direction = mapped_direction.name.lower()
             count_value = stats.get("count")
             history_summary.append(
                 LLMHistoryMetric(
@@ -700,6 +728,7 @@ class MetaSearchAdjuster:
             objectives=objectives,
             current_best=current_best,
             history_summary=history_summary,
+            history_notes=history_notes,
             trials_completed=trials_completed,
             notes=notes,
         )
@@ -801,6 +830,8 @@ def create_meta_search_adjuster(
     *,
     direction: optuna.study.StudyDirection,
     metric_name: str,
+    metric_names: Sequence[str],
+    directions: Sequence[optuna.study.StudyDirection],
     search_space: Mapping[str, Mapping[str, Any]],
     seed: int | None,
 ) -> MetaSearchAdjuster | None:
@@ -821,6 +852,8 @@ def create_meta_search_adjuster(
         llm_cfg=llm_cfg,
         seed=seed,
         policies=meta_cfg.get("policies"),
+        objectives=list(metric_names),
+        objective_directions=list(directions),
     )
 
 
