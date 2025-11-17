@@ -1,20 +1,21 @@
 # Astraia MVP Skeleton
 
-「Astraia」は、YAML 設定で定義した評価器・探索空間を読み込んで Optuna ベースの探索ループを自動生成し、CSV/Markdown/LLM レポートを含む成果物を残す LLM 駆動最適化フレームワークです。本リポジトリには MVP（最小実行可能プロダクト）のソースコードと、誰でもすぐに試せる qGAN KL 最適化のサンプルが含まれています。
+「Astraia」は、YAML 設定で定義した評価器・探索空間を読み込んで Optuna ベースの探索ループを自動生成し、CSV/Markdown/LLM レポート、Pareto サマリ、PNG 可視化などの成果物を残す LLM 駆動最適化フレームワークです。本リポジトリには MVP（最小実行可能プロダクト）のソースコードと、誰でもすぐに試せる qGAN KL 最適化のサンプルが含まれています。
 
 ## 主な機能
 
-- `configs/` にある YAML 設定を `OptimizationConfig`（`src/astraia/config.py`）で検証しながら読み込み。
-- Optuna による探索・停止条件制御・ベストトライアル追跡を自動化。
-- CSV ログ、Markdown レポート、LLM 使用量ログを `runs/` 以下に保存。
-- LLM ガイダンス / メタ探索 / LLM クリティックで探索候補生成・戦略調整・診断を強化。
-- `astraia runs` サブコマンドで実験管理（一覧、詳細、削除、ステータス更新）が可能。
+- `configs/` にある YAML 設定を `OptimizationConfig`（`src/astraia/config.py`）で厳密に検証して読み込み、`search.metric(s)` と `report.metrics` の整合性や探索空間の境界をチェック。
+- Optuna による探索ループ、停止条件制御、ベストトライアル追跡を自動化し、Pareto 代表点やハイパーボリュームも計算。
+- CSV ログ、Markdown レポート、LLM 使用量ログ、比較サマリ JSON、PNG グラフを `runs/<run_id>/` に保存。Git コミットや設定のスナップショットも自動記録。
+- LLM ガイダンス / メタ探索 / LLM クリティックで探索候補生成・戦略調整・診断を強化し、Pareto summary を LLM に共有して説明性を高める。
+- `astraia runs list|show|delete|status|diff|compare` で実行履歴をメタデータ付きで管理。状態更新時はタグ、任意メトリクス、Pareto サマリ JSON を付与可能。
+- `astraia visualize --type history|pareto` で CSV ログからベスト値の推移や Pareto front を即時描画。GUI なし環境でも matplotlib の非対話 backend で PNG を生成。
 
 ## セットアップ手順
 
 1. Python 3.11 以上と pip を用意します。
 2. このリポジトリをクローンし、任意の仮想環境を有効化します。
-3. 依存関係をインストールします。LLM を使用しない場合はベースのみ、OpenAI/Gemini を使う場合は extras を付けます。
+3. 依存関係をインストールします。標準の `pip install -e .` には Optuna / pandas / matplotlib などが含まれます。OpenAI/Gemini を使う場合は extras を付けます。
 
    ```bash
    pip install -e .           # ベースのみ
@@ -24,36 +25,50 @@
    ```
 
 4. LLM API キーを `.env` に追記します（例: `OPENAI_API_KEY=sk-...`）。テンプレートは `.env.example` をコピーしてください。
-5. `astraia --dry-run` を実行すると `.env` の必須キー検証と LLM プロバイダ疎通チェックを行えます。
+5. `astraia --dry-run` を実行して `.env` の必須キー検証と LLM プロバイダ疎通チェックを行い、ネットワークエラーや権限不足を事前に検知します。
+6. （任意）`pytest` で単体テストを実行して環境整合性を確認します。
 
-## クイックスタート
+## クイックスタート：標準的なワークフロー
 
-サンプル設定（`configs/qgan_kl.yaml`）を用いて最適化を行う場合は次のコマンドを実行します。
+1. **設定を確認**：`astraia --config configs/qgan_kl.yaml --summarize` でサマリ、`--as-json` でバリデーション済み JSON を確認します。
+2. **ドライラン**：`astraia --config configs/qgan_kl.yaml --dry-run` で `.env` と LLM 疎通を検証します。
+3. **探索を実行**：
 
-```bash
-astraia --config configs/qgan_kl.yaml
-# または python -m astraia.cli --config configs/qgan_kl.yaml
-```
+   ```bash
+   astraia --config configs/qgan_kl.yaml
+   # または python -m astraia.cli --config configs/qgan_kl.yaml
+   ```
 
-実行後は以下の成果物が作成されます。
+4. **成果物を確認**：`runs/qgan_kl_minimal/` に以下が生成されます。
 
-- `runs/qgan_kl_minimal/log.csv`: 各トライアルのパラメタとメトリクス
-- `reports/qgan_kl_minimal.md`: ベストトライアルをまとめた Markdown レポート
-- `runs/qgan_kl_minimal/llm_usage.csv`: LLM 呼び出しログ（LLM 有効時のみ）
+   - `log.csv`: 各トライアルのパラメタ (`param_*`) とメトリクス (`metric_*`)
+   - `report.md`: ベストトライアル、Pareto front、LLM 考察、ハイパーボリュームまとめ
+   - `llm_usage.csv`: LLM 呼び出しログ（LLM 設定が有効な場合）
+   - `comparison_summary.json`: `runs compare` 用の統計キャッシュ
+   - `log_history.png`, `log_pareto.png`: `astraia visualize` を実行した際に生成される PNG
 
-CLI は常に設定ファイルを Pydantic で検証し、`search.metric` と `report.metrics` の整合性や探索空間の境界チェック（`low < high` など）を実施します。実行前に内容を確認したい場合は以下が便利です。
+5. **実行管理・可視化**：
 
-```bash
-# 設定サマリを確認
-astraia --config configs/qgan_kl.yaml --summarize
+   ```bash
+   # 設定サマリ / JSON（実行せずに確認）
+   astraia --config configs/qgan_kl.yaml --summarize
+   astraia --config configs/qgan_kl.yaml --as-json
 
-# バリデーション後の設定を JSON で取得
-astraia --config configs/qgan_kl.yaml --as-json
+   # 実行リストと詳細
+   astraia runs list
+   astraia runs show --run-id qgan_kl_minimal
 
-# プランナーを一時的に上書き
-astraia --config configs/qgan_kl.yaml --planner llm \
-  --planner-config planner_prompts/qgan_kl_minimal.txt
-```
+   # 差分 / 比較 / ステータス更新
+   astraia runs diff --run-id qgan_kl_minimal --run-id another_run
+   astraia runs compare --runs qgan_kl_minimal another_run --metric kl --stat best --stat median
+   astraia runs status --run-id qgan_kl_minimal --state completed --best-value 0.12 --note "収束" --tag objectives=single
+
+   # 可視化
+   astraia visualize --run-id qgan_kl_minimal --type history
+   astraia visualize --run-id qgan_kl_minimal --type pareto --metric kl --metric depth
+   ```
+
+CLI は常に設定ファイルを Pydantic で検証し、`--planner` と `--planner-config` でプランナー設定を一時的に上書きできます。
 
 ### 多目的ベンチマークのサンプル
 
@@ -62,7 +77,20 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 - `configs/multiobj/qgan_kl_depth.yaml`: qGAN KL を最小化しつつ回路深さ (`depth`) とトレードオフする 2 目的問題。NSGA-II サンプラーで KL・深さの Pareto 前線を確認できます。
 - `configs/multiobj/zdt3.yaml`: 連続関数ベンチマーク ZDT3 を evaluator 化した純粋な 2 目的探索。5 次元の連続パラメタ空間を用い、量子特有メトリクスを使わずに挙動を確認できます。
 
-どちらも `llm_guidance` と `meta_search` を無効化しているため、API キーを持っていない環境でも `astraia --config <file>` だけで動作します。
+いずれも `llm_guidance` と `meta_search` を無効化しているため、API キーを持っていない環境でも `astraia --config <file>` だけで動作します。実行後は `report.md` に Pareto front の代表解、`log_pareto.png` に散布図が埋め込まれます。
+
+## 生成される成果物
+
+| ファイル | 内容 |
+| --- | --- |
+| `config_original.yaml` / `config_resolved.json` | 実行時点の設定（元ファイルのコピーと検証済み JSON）。 |
+| `log.csv` | 各トライアルのパラメタ・メトリクス。`astraia visualize` や `runs compare` が参照。 |
+| `report.md` | ベスト試行、Pareto front、LLM クリティック、ハイパーボリュームの Markdown レポート。 |
+| `llm_usage.csv` | LLM 呼び出しログ（LLM 設定が存在する場合）。 |
+| `comparison_summary.json` | `runs compare` が利用する統計キャッシュ。`runs status --pareto-summary` で Pareto サマリを追記可能。 |
+| `meta.json` | `runs list` / `runs show` が参照するメタデータ。Git コミットやシード、アーティファクトの場所を記録。 |
+
+`astraia visualize` を実行すると `log_history.png` や `log_pareto.png` が同ディレクトリに生成されます。`--output` を指定すれば任意のパスに保存できます。
 
 ## CLI リファレンス
 
@@ -70,12 +98,13 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 
 | オプション | 説明 |
 | --- | --- |
-| `--config PATH` | 最適化設定ファイル（既定: `configs/qgan_kl.yaml`） |
-| `--summarize` | 実行せずに設定サマリのみ出力 |
-| `--as-json` | バリデーション済み設定を JSON で表示 |
-| `--planner {none,rule,llm}` | 設定ファイルのプランナー指定を一時的に上書き |
-| `--planner-config PATH` | プランナー固有設定（プロンプトなど）を差し替え |
-| `--dry-run` | `.env` の秘密鍵検証と LLM 疎通テストのみ実施 |
+| `--config PATH` | 最適化設定ファイル（既定: `configs/qgan_kl.yaml`）。 |
+| `--summarize` | 実行せずに設定サマリのみ出力。 |
+| `--as-json` | バリデーション済み設定を JSON で表示。 |
+| `--planner {none,rule,llm}` | 設定ファイルのプランナー指定を一時的に上書き。 |
+| `--planner-config PATH` | プランナー固有設定（プロンプトなど）を差し替え。 |
+| `--dry-run` | `.env` の秘密鍵検証と LLM 疎通テストのみ実施。 |
+| `visualize` | ログ CSV からベスト値履歴 or Pareto front を描画。 |
 
 ### `runs` サブコマンド
 
@@ -86,7 +115,18 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 | `astraia runs list` | 既存の実行を一覧表示。`--status`、`--filter key=value`、`--json`、`--limit` 等で絞り込み可能。 | `astraia runs list --status completed --limit 10` |
 | `astraia runs show --run-id <id>` | 指定した実行のメタデータ・成果物・解決済み設定を表示。`--as-json` も可。 | `astraia runs show --run-id qgan_kl_minimal` |
 | `astraia runs delete --run-id <id>` | 成果物ディレクトリを削除。`--dry-run` や `--yes` で挙動制御。 | `astraia runs delete --run-id old_run --yes` |
-| `astraia runs status --run-id <id>` | 任意の状態メモを付与。`--state`（必須）に加えて `--best-value`、`--metric name=value`、`--payload key=value` で指標を更新。 | `astraia runs status --run-id demo --state archived --best-value 0.12` |
+| `astraia runs status --run-id <id>` | 任意の状態メモを付与。`--state`（必須）に加えて `--best-value`、`--metric name=value`、`--payload key=value`、`--tag key=value` を付与し、`--pareto-summary path.json` で Pareto front 概要を保存。 | `astraia runs status --run-id demo --state archived --best-value 0.12 --pareto-summary pareto.json` |
+| `astraia runs diff --run-id <a> --run-id <b>` | 複数実行の検証済み設定 (`config_resolved.json`) 差分を表示。 | `astraia runs diff --run-id baseline --run-id tuned` |
+| `astraia runs compare --runs <id...>` | ログ CSV を集計し、メトリクス別のベスト/中央値/平均を比較。`--metric` や `--stat` で列を制御し、`--json` で機械可読に。 | `astraia runs compare --runs qgan_kl_minimal another_run --metric kl --stat best` |
+
+### `visualize` サブコマンド
+
+| オプション | 説明 |
+| --- | --- |
+| `--type {history, pareto}` | ベスト値履歴または Pareto front を描画。Pareto の場合はメトリクスを 2 つ指定します。 |
+| `--metric NAME` | 描画するメトリクスを列挙。多目的探索時は `--metric kl --metric depth` のように複数指定。 |
+| `--output PATH` | 保存先を明示的に指定。省略時は `runs/<id>/log_history.png` などが生成されます。 |
+| `--title TEXT` | グラフタイトルの上書き。 |
 
 ## 設定ファイルの構成
 
@@ -98,12 +138,12 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 - `stopping`: 停止条件 (`max_trials`, `max_time_minutes`, `no_improve_patience`)。
 - `search_space`: `float` / `int` / `categorical` など型別に探索範囲を定義。
 - `evaluator`: `module` と `callable` を指定し、`BaseEvaluator` 互換の評価器をロード。
-- `report`: Markdown レポートの保存先や表示するメトリクス。
+- `report`: Markdown レポートの保存先や表示するメトリクス。Pareto CSV や PNG もここで指定された出力ディレクトリに保存されます。
 - `artifacts`: ルートディレクトリ (`run_root`)、ログファイル (`log_file`)、追加アーティファクトの出力パス。
 - `planner`: ルール / LLM バックエンド（`backend`）と固有設定パス (`config_path`)。
 - `llm`: `provider`（`openai` or `gemini`）、`model`、`usage_log` などの LLM 設定。
 - `llm_guidance`: LLM を使った候補生成の有効化フラグ、バッチサイズ、プロンプト設定。
-- `meta_search`: トライアル要約頻度、利用する LLM またはヒューリスティックの種類。
+- `meta_search`: トライアル要約頻度、利用する LLM またはヒューリスティックの種類。Pareto summary の代表点や trade-off テキストもここで生成されます。
 - `llm_critic`: 実行後レポートを生成する LLM/ヒューリスティックの設定。
 
 ## 評価モジュール
@@ -111,19 +151,18 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 - すべての評価器は `BaseEvaluator`（`src/astraia/evaluators/base.py`）を継承し、`evaluate(params, seed)` を実装します。
 - qGAN KL のサンプルは `QGANKLEvaluator`（`src/astraia/evaluators/qgan_kl.py`）として実装済みで、`evaluator.callable: create_evaluator` によってファクトリを呼び出します。`depth` や `shots` を探索空間に含めれば多目的指標としてそのまま最適化できます。
 - 連続関数ベンチマークとして ZDT3 evaluator（`src/astraia/evaluators/zdt3.py`）を追加。`f1` と `f2` を Optuna の多目的サンプラーへ直接渡せます。
-- 評価結果は `kl`（主指標）や `depth`, `shots`, `params` などを含む辞書で返却され、`search.metric` に一致するキーを Optuna へ報告します。
+- 評価結果は `kl`（主指標）や `depth`, `shots`, `params` などを含む辞書で返却され、`search.metric(s)` に一致するキーを Optuna へ報告します。
 - 多目的探索でも Evaluator の戻り値は同じ辞書形式のままで、`search.metric`（単目的）または `search.metrics`（多目的）に列挙されたキーを Optuna へ受け渡すだけで済みます。
 - `BaseEvaluator` は `trial_timeout_sec` / `max_retries` / `graceful_nan_policy` を解釈し、例外・NaN/Inf・タイムアウト発生時でも構造化された失敗ペイロードで探索を継続します。
-- 失敗時は `status != "ok"` や `timed_out: true` が付与され、探索ループは単目的ならペナルティ値（方向に応じて `inf` or `-inf`）を 1 つ、多目的なら `[penalty_value] * n_objectives` を Optuna に返して一貫したスコアリングを行います。
-- 乱数シードは Python/NumPy/PyTorch へ一括で設定され、一時ディレクトリで副作用を隔離します。
 
 ## LLM 連携
 
 - `llm_guidance`: LLM で探索候補をバッチ生成し、失敗時はキャッシュや乱択でフォールバックします。
-- `meta_search`: トライアル履歴を要約して LLM またはヒューリスティックに渡し、サンプラー切り替え・探索範囲縮小・早期停止を指示できます。
+- `meta_search`: トライアル履歴を要約して LLM またはヒューリスティックに渡し、サンプラー切り替え・探索範囲縮小・早期停止を指示できます。Pareto front の代表解 (`pareto_summary`) もここで作成されます。
 - `llm_critic`: 実行ログを解析し、NaN/Inf や停滞を Markdown で報告。`usage_log` または `artifacts.run_root` 配下に `llm_usage.csv` を追記します。
 - `.env` の秘密鍵読み込みは `ensure_env_keys`（`astraia.cli` 内）が行い、未設定の場合は明示的なエラーで終了します。
 - `--dry-run` オプションは設定検証 → `.env` チェック → LLM SDK の `ping` 呼び出し（`create_llm_provider` 経由）までを実行し、ネットワーク疎通や API 権限を事前確認できます。
+- `runs compare` で参照する統計は `run_summary.py` の集計ロジックを利用しており、pandas がインストールされている場合は DataFrame での前処理も可能です。
 
 ## ディレクトリ構成
 
@@ -132,8 +171,8 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 | `configs/` | サンプル設定。`qgan_kl.yaml` がデフォルト実験です。 |
 | `configs/multiobj/` | LLM なしで動かせる多目的ベンチマーク（qGAN/ZDT3 など）。 |
 | `planner_prompts/` | LLM プランナー向けのプロンプトテンプレート。`--planner-config` で指定。 |
-| `src/astraia/` | CLI、設定検証、Optuna ループ、LLM 関連モジュールの実装。 |
-| `tests/` | `unittest` ベースのテストスイート。環境差分を減らすため `PYTHONPATH=src` で起動してください。 |
+| `src/astraia/` | CLI、設定検証、Optuna ループ、Pareto 要約、可視化、LLM 関連モジュールの実装。 |
+| `tests/` | `pytest` ベースのテストスイート。`PYTHONPATH=src pytest` で実行できます。 |
 | `runs/` | 実行ごとの成果物とメタデータ。`astraia runs` で操作します。 |
 | `reports/` | Markdown レポート出力先（`report.output_dir` で変更可）。 |
 
@@ -141,9 +180,9 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 
 - qGAN KL 最適化の最小構成設定（`configs/qgan_kl.yaml`）に加え、`configs/multiobj/` に多目的用の qGAN/ZDT3 ベンチマークを整備。
 - CLI から設定読み込み / バリデーション / サマリ表示 / JSON 出力 / 探索実行 / 実行管理サブコマンドに対応。
-- Optuna ベースの探索ループと CSV ログ・Markdown レポート生成を実装。ベスト値や早期停止理由も記録。
+- Optuna ベースの探索ループと CSV ログ・Markdown レポート生成を実装。ベスト値や早期停止理由、Pareto front、LLM 考察も記録。
 - Pydantic スキーマで探索空間や LLM 依存関係を検証。
-- LLM ガイダンス、メタ探索、LLM クリティック、使用量ロガーを実装し、依存未インストール時は安全にフォールバック。
+- LLM ガイダンス、メタ探索、LLM クリティック、使用量ロガー、Pareto 要約、PNG 可視化を実装し、依存未インストール時は安全にフォールバック。
 - `tests/` 以下に設定検証・LLM 補助機能・qGAN 評価器のユニットテストを整備。
 
 ## 今後の計画
@@ -159,13 +198,14 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 - [x] CSV ログ / Markdown レポート出力
 - [x] LLM ガイダンス / メタ探索 / クリティック / 使用量ログ
 - [x] CLI オプションと `runs` サブコマンド
+- [x] Pareto summary と `astraia visualize`
 - [ ] CI ワークフロー（lint/test）の自動実行
 - [ ] 追加ベンチマーク設定と評価器
 
 ## テスト
 
-標準ライブラリの `unittest` を利用したテストスイートを用意しています。
+`pytest` ベースのテストスイートを用意しています。`PYTHONPATH` を `src` に通した状態で実行してください。
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests
+PYTHONPATH=src pytest -q
 ```
