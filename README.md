@@ -57,10 +57,10 @@ astraia --config configs/qgan_kl.yaml --planner llm \
 
 ### 多目的ベンチマークのサンプル
 
-LLM を一切使わずに多目的探索を試したい場合は次の設定を利用できます。
+LLM を一切使わずに多目的探索を試したい場合は `configs/multiobj/` にある設定を利用できます。
 
-- `configs/qgan_kl_multi.yaml`: qGAN KL に深さ (`depth`) とショット数 (`shots`) を加えた 3 目的問題。Optuna の NSGA-II サンプラーで KL・深さ・ショット数を同時に最小化します。
-- `configs/zdt3_multi.yaml`: 連続関数ベンチマーク ZDT3 を evaluator 化した純粋な 2 目的探索。5 次元の連続パラメタ空間を用い、量子特有メトリクスを使わずに挙動を確認できます。
+- `configs/multiobj/qgan_kl_depth.yaml`: qGAN KL を最小化しつつ回路深さ (`depth`) とトレードオフする 2 目的問題。NSGA-II サンプラーで KL・深さの Pareto 前線を確認できます。
+- `configs/multiobj/zdt3.yaml`: 連続関数ベンチマーク ZDT3 を evaluator 化した純粋な 2 目的探索。5 次元の連続パラメタ空間を用い、量子特有メトリクスを使わずに挙動を確認できます。
 
 どちらも `llm_guidance` と `meta_search` を無効化しているため、API キーを持っていない環境でも `astraia --config <file>` だけで動作します。
 
@@ -130,6 +130,7 @@ LLM を一切使わずに多目的探索を試したい場合は次の設定を�
 | パス | 内容 |
 | --- | --- |
 | `configs/` | サンプル設定。`qgan_kl.yaml` がデフォルト実験です。 |
+| `configs/multiobj/` | LLM なしで動かせる多目的ベンチマーク（qGAN/ZDT3 など）。 |
 | `planner_prompts/` | LLM プランナー向けのプロンプトテンプレート。`--planner-config` で指定。 |
 | `src/astraia/` | CLI、設定検証、Optuna ループ、LLM 関連モジュールの実装。 |
 | `tests/` | `unittest` ベースのテストスイート。環境差分を減らすため `PYTHONPATH=src` で起動してください。 |
@@ -138,7 +139,7 @@ LLM を一切使わずに多目的探索を試したい場合は次の設定を�
 
 ## 現在の進捗状況
 
-- qGAN KL 最適化の最小構成設定（`configs/qgan_kl.yaml`）に加え、多目的版（`configs/qgan_kl_multi.yaml`）と ZDT3 連続ベンチマーク（`configs/zdt3_multi.yaml`）を整備。
+- qGAN KL 最適化の最小構成設定（`configs/qgan_kl.yaml`）に加え、`configs/multiobj/` に多目的用の qGAN/ZDT3 ベンチマークを整備。
 - CLI から設定読み込み / バリデーション / サマリ表示 / JSON 出力 / 探索実行 / 実行管理サブコマンドに対応。
 - Optuna ベースの探索ループと CSV ログ・Markdown レポート生成を実装。ベスト値や早期停止理由も記録。
 - Pydantic スキーマで探索空間や LLM 依存関係を検証。

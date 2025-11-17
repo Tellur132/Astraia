@@ -1,19 +1,19 @@
 metadata:
-  name: qgan_kl_multi
-  description: KL・深さ・ショット数を同時に最適化する qGAN 多目的ベンチマーク。
+  name: multiobj_qgan_kl_depth
+  description: >-
+    qGAN KL を主指標にしつつ回路の depth も同時に最小化する 2 目的ベンチマーク。
+    LLM を使わずに NSGA-II サンプラーで Pareto 前線を得るシンプルな例です。
 seed: 123
 search:
   library: optuna
   sampler: nsga2
   n_trials: 12
   multi_objective: true
-  metrics: [kl, depth, shots]
-  directions: [minimize, minimize, minimize]
-  study_name: qgan_kl_multi
+  metrics: [kl, depth]
+  directions: [minimize, minimize]
 stopping:
   max_trials: 12
-  max_time_minutes: 10
-  no_improve_patience: 6
+  max_time_minutes: 5
 search_space:
   theta:
     type: float
@@ -23,11 +23,6 @@ search_space:
     type: int
     low: 1
     high: 4
-  shots:
-    type: int
-    low: 64
-    high: 512
-    log: true
 llm_guidance:
   enabled: false
 meta_search:
@@ -39,11 +34,10 @@ evaluator:
   shots: 256
 report:
   output_dir: reports
-  filename: qgan_kl_multi.md
+  filename: multiobj_qgan_kl_depth.md
   metrics:
     - kl
     - depth
-    - shots
 artifacts:
-  run_root: runs/qgan_kl_multi
-  log_file: runs/qgan_kl_multi/log.csv
+  run_root: runs/multiobj_qgan_kl_depth
+  log_file: runs/multiobj_qgan_kl_depth/log.csv

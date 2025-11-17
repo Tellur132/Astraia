@@ -333,8 +333,9 @@ def _execute_trial(
         objective_values = _failure_penalty_values(study_directions)
 
     tuple_values = tuple(objective_values)
-    for step, value in enumerate(tuple_values):
-        trial.report(value, step=step)
+    if len(tuple_values) == 1:
+        for step, value in enumerate(tuple_values):
+            trial.report(value, step=step)
 
     trial.set_user_attr("metrics", dict(metrics))
     # Placeholders for future Pareto analytics.

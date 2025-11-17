@@ -1,17 +1,19 @@
 metadata:
-  name: zdt3_multi
-  description: ZDT3 連続関数を evaluator に使った純粋な多目的探索の例。
+  name: multiobj_zdt3
+  description: >-
+    連続関数ベンチマーク ZDT3 を evaluator にした純粋な 2 目的探索。
+    5 変数の連続空間で f1/f2 の Pareto フロントを観察できます。
 seed: 7
 search:
   library: optuna
   sampler: nsga2
-  n_trials: 20
+  n_trials: 18
   multi_objective: true
   metrics: [f1, f2]
   directions: [minimize, minimize]
 stopping:
-  max_trials: 20
-  max_time_minutes: 10
+  max_trials: 18
+  max_time_minutes: 5
 search_space:
   x1:
     type: float
@@ -42,10 +44,10 @@ evaluator:
   callable: create_zdt3_evaluator
 report:
   output_dir: reports
-  filename: zdt3_multi.md
+  filename: multiobj_zdt3.md
   metrics:
     - f1
     - f2
 artifacts:
-  run_root: runs/zdt3_multi
-  log_file: runs/zdt3_multi/log.csv
+  run_root: runs/multiobj_zdt3
+  log_file: runs/multiobj_zdt3/log.csv
