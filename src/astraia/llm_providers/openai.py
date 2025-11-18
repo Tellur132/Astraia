@@ -61,20 +61,21 @@ class OpenAIProvider:
                 }
             }
         if tool is not None:
+            function_def = {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
             response_kwargs["tools"] = [
                 {
                     "type": "function",
                     "name": tool.name,
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    },
+                    "function": function_def,
                 }
             ]
             response_kwargs["tool_choice"] = {
-                "type": "tool",
-                "name": tool.name,
+                "type": "function",
+                "function": {"name": tool.name},
             }
         if stop:
             response_kwargs["stop"] = list(stop)
