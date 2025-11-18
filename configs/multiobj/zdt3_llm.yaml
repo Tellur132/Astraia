@@ -10,7 +10,12 @@ planner:
   role: planner
   prompt_template: planner_prompts/zdt3_llm.txt
   enabled: true   # LLMプランナー有効化フラグ
-
+  roles:
+    planner:
+      prompt_template: planner_prompts/zdt3_llm.txt
+    candidate:
+      llm: null
+  
 llm:
   provider: openai
   model: gpt-4.1-mini

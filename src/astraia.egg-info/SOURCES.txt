@@ -41,6 +41,7 @@ tests/test_llm_guidance.py
 tests/test_llm_usage.py
 tests/test_meta_search.py
 tests/test_multiobj_configs.py
+tests/test_openai_provider.py
 tests/test_optimization_helpers.py
 tests/test_pareto_report.py
 tests/test_pareto_summary.py

@@ -61,22 +61,25 @@ class OpenAIProvider:
                 }
             }
         if tool is not None:
+            # Responses API 用のツール定義
             function_def = {
+                "type": "function",
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.parameters,
+                # "strict": True,  # 必要なら strict にしたいときここを有効化
             }
-            response_kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "name": tool.name,
-                    "function": function_def,
-                }
-            ]
-            response_kwargs["tool_choice"] = {
-                "type": "function",
-                "function": {"name": tool.name},
-            }
+
+            # ここを変更: Chat Completions 形式ではなく、
+            # Responses API 形式で tools を渡す
+            response_kwargs["tools"] = [function_def]
+
+            # ここを変更: tool_choice はシンプルに文字列で指定
+            # - "auto"    : モデルに任せる（デフォルト）
+            # - "required": 必ずツールを呼ばせる（今回はこちら推奨）
+            response_kwargs["tool_choice"] = "required"
+            # あるいは完全に省略してもよい（その場合はデフォルト "auto"）
+
         if stop:
             response_kwargs["stop"] = list(stop)
 
@@ -103,7 +106,8 @@ def _extract_text(response: Any, *, expected_tool: ToolDefinition | None) -> tup
     """Best-effort extraction of text content from an OpenAI response."""
 
     if expected_tool is not None:
-        arguments = _extract_tool_arguments(response, tool_name=expected_tool.name)
+        arguments = _extract_tool_arguments(
+            response, tool_name=expected_tool.name)
         if arguments is not None:
             return arguments, expected_tool.name
 
@@ -130,6 +134,17 @@ def _extract_tool_arguments(response: Any, *, tool_name: str) -> str | None:
     output = getattr(response, "output", None)
     if isinstance(output, Sequence):
         for block in output:
+            # ここを追加: Responses API の function_call 形式
+            block_type = getattr(block, "type", None)
+            if block_type == "function_call":
+                name = getattr(block, "name", None)
+                if name and str(name) != tool_name:
+                    continue
+                arguments = getattr(block, "arguments", None)
+                if arguments is not None:
+                    return str(arguments)
+
+            # 既存の Chat Completions 形式（tool_calls）も残しておく
             content_items = getattr(block, "content", None)
             if isinstance(content_items, Sequence):
                 for item in content_items:
