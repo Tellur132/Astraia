@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from astraia.config import OptimizationConfig, ValidationError
+from astraia import cli
 
 
 def make_base_config() -> dict:
@@ -243,6 +245,18 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         config = OptimizationConfig.model_validate(data)
         assert config.llm_critic is not None
         self.assertTrue(config.llm_critic.enabled)
+
+
+class ConfigFileSmokeTests(unittest.TestCase):
+    def test_multiobj_zdt3_llm_config_parses(self) -> None:
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "configs"
+            / "multiobj"
+            / "zdt3_llm.yaml"
+        )
+        config = cli.load_config(config_path)
+        self.assertEqual(config.metadata.name, "multiobj_zdt3_llm")
 
 
 if __name__ == "__main__":  # pragma: no cover
