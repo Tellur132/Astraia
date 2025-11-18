@@ -48,7 +48,6 @@ def test_openai_provider_emits_responses_tool_payload(monkeypatched_client):
     assert kwargs["tools"] == [
         {
             "type": "function",
-            "name": tool.name,
             "function": {
                 "name": tool.name,
                 "description": tool.description,
