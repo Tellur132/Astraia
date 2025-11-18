@@ -1,0 +1,104 @@
+metadata:
+  name: multiobj_zdt3_llm
+  description: >-
+    連続関数ベンチマーク ZDT3 を evaluator にした純粋な 2 目的探索。
+    5 変数の連続空間で f1/f2 の Pareto フロントを観察できます。
+    すべての試行で LLM ガイダンスを有効化しています。
+seed: 7
+planner:
+  backend: llm
+  role: planner
+  prompt_template: planner_prompts/zdt3_llm.txt
+  enabled: true   # LLMプランナー有効化フラグ
+
+llm:
+  provider: openai
+  model: gpt-4.1-mini
+  usage_log: runs/multiobj_zdt3_llm/llm_usage.csv
+llm_guidance:
+  enabled: true
+  problem_summary: "We are optimizing the continuous multi-objective benchmark function ZDT3.
+    There are 5 decision variables x1,...,x5, each constrained to the range [0, 1].
+    For each candidate vector x, the evaluator returns two objectives f1(x) and f2(x),
+    both of which should be minimized. The true Pareto front of ZDT3 is discontinuous
+    and consists of several separated segments."
+  objective: "Propose diverse 5-dimensional candidate points within [0, 1]^5 that move the
+    search closer to the Pareto front of ZDT3. Aim to simultaneously minimize f1
+    and f2, avoid clearly dominated solutions, and cover a wide range of trade-offs
+    along the Pareto front (not just a single region)."
+  n_proposals: 3
+  max_retries: 2
+  base_temperature: 0.7
+  min_temperature: 0.3
+meta_search:
+  enabled: true
+  interval: 6
+  summary_trials: 6
+llm_critic:
+  enabled: true
+  prompt_preamble: "You are an expert in multi-objective optimization and hyperparameter tuning.
+    You will be given the config, metrics, and Pareto summary of a completed
+    optimization run produced by the Astraia framework. Based only on that
+    information, write a concise analysis report in Japanese for a graduate
+    student in information engineering.
+
+    The report should:
+    - Briefly summarize what problem was optimized, which objectives/metrics
+      were used, and what search settings were chosen.
+    - Comment on convergence behaviour (e.g., how quickly the best values
+      improved, whether they stagnated) and the quality/diversity of the
+      Pareto front.
+    - Highlight important trade-offs between objectives and any signs of
+      poor coverage (e.g., missing regions, dominated clusters).
+    - Propose 2-4 concrete next-step ideas for future experiments or
+      configuration changes (e.g., search space tweaks, sampler choices,
+      LLM-guidance settings).
+
+    Use only the numbers and facts explicitly contained in the input data.
+    Do NOT fabricate metrics or pretend to know missing values.
+    Use short paragraphs and bullet points so that the report is easy to read."
+
+search:
+  library: optuna
+  sampler: nsga2
+  n_trials: 18
+  multi_objective: true
+  metrics: [f1, f2]
+  directions: [minimize, minimize]
+stopping:
+  max_trials: 18
+  max_time_minutes: 5
+search_space:
+  x1:
+    type: float
+    low: 0.0
+    high: 1.0
+  x2:
+    type: float
+    low: 0.0
+    high: 1.0
+  x3:
+    type: float
+    low: 0.0
+    high: 1.0
+  x4:
+    type: float
+    low: 0.0
+    high: 1.0
+  x5:
+    type: float
+    low: 0.0
+    high: 1.0
+
+evaluator:
+  module: astraia.evaluators.zdt3
+  callable: create_zdt3_evaluator
+report:
+  output_dir: reports
+  filename: multiobj_zdt3_llm.md
+  metrics:
+    - f1
+    - f2
+artifacts:
+  run_root: runs/multiobj_zdt3_llm
+  log_file: runs/multiobj_zdt3_llm/log.csv
