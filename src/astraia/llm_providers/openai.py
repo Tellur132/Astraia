@@ -69,6 +69,7 @@ class OpenAIProvider:
             response_kwargs["tools"] = [
                 {
                     "type": "function",
+                    "name": tool.name,
                     "function": function_def,
                 }
             ]
