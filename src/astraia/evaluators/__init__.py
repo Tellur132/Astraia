@@ -8,6 +8,8 @@ from .base import (
     GracefulNaNPolicy,
     MetricValue,
 )
+from .qaoa import QAOAEvaluator, create_qaoa_evaluator
+from .qft_fidelity import QFTFidelityEvaluator, create_qft_fidelity_evaluator
 from .qgan_kl import QGANKLEvaluator, create_evaluator
 from .zdt3 import ZDT3Evaluator, create_zdt3_evaluator
 
@@ -19,7 +21,11 @@ __all__ = [
     "GracefulNaNPolicy",
     "MetricValue",
     "QGANKLEvaluator",
+    "QAOAEvaluator",
+    "QFTFidelityEvaluator",
     "create_evaluator",
+    "create_qaoa_evaluator",
+    "create_qft_fidelity_evaluator",
     "ZDT3Evaluator",
     "create_zdt3_evaluator",
 ]
