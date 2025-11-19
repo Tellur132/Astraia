@@ -37,6 +37,16 @@ class OptimizationHelperTests(unittest.TestCase):
         self.assertTrue(math.isinf(penalties[0]) and penalties[0] > 0)
         self.assertTrue(math.isinf(penalties[1]) and penalties[1] < 0)
 
+    def test_llm_only_parameter_respects_enqueued_value(self) -> None:
+        search_space = {"code": {"type": "llm_only", "default": "placeholder"}}
+        study = optuna.create_study()
+        study.enqueue_trial({"code": "from LLM"})
+        trial = study.ask()
+
+        params = optimization.sample_params(trial, search_space)
+
+        self.assertEqual(params["code"], "from LLM")
+
 
 if __name__ == "__main__":
     unittest.main()

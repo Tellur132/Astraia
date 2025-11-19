@@ -102,6 +102,14 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             OptimizationConfig.model_validate(data)
 
+    def test_llm_only_parameter_is_accepted(self) -> None:
+        data = make_base_config()
+        data["search_space"]["circuit_code"] = {"type": "llm_only", "default": " <code> "}
+        config = OptimizationConfig.model_validate(data)
+        spec = config.search_space["circuit_code"]
+        self.assertEqual(spec["type"], "llm_only")
+        self.assertEqual(spec["default"], "<code>")
+
     def test_missing_required_field_fails(self) -> None:
         data = make_base_config()
         del data["evaluator"]

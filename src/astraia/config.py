@@ -330,10 +330,27 @@ class CategoricalParam(BaseModel):
         return self
 
 
+class LLMOnlyParam(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    default: Any | None = None
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "LLMOnlyParam":
+        if self.type.lower() != "llm_only":
+            raise ValueError("Search space entry type must be 'llm_only'")
+        if self.default is not None and isinstance(self.default, str):
+            cleaned = self.default.strip()
+            self.default = cleaned
+        return self
+
+
 PARAMETER_MODELS = {
     "float": FloatParam,
     "int": IntParam,
     "categorical": CategoricalParam,
+    "llm_only": LLMOnlyParam,
 }
 
 
