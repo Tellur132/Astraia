@@ -1170,9 +1170,26 @@ def sample_params(trial: optuna.trial.Trial, space: Mapping[str, Any]) -> Dict[s
             )
         elif param_type == "categorical":
             params[name] = trial.suggest_categorical(name, list(spec["choices"]))
+        elif param_type == "llm_only":
+            params[name] = _suggest_llm_only(trial, name, spec)
         else:
             raise ValueError(f"Unsupported parameter type for '{name}': {param_type}")
     return params
+
+
+def _suggest_llm_only(trial: optuna.trial.Trial, name: str, spec: Mapping[str, Any]) -> Any:
+    fixed_value = None
+    fixed_params = getattr(trial, "_fixed_params", {})
+    if isinstance(fixed_params, Mapping):
+        fixed_value = fixed_params.get(name)
+
+    if fixed_value is None:
+        fallback = spec.get("default")
+        if fallback is None:
+            fallback = f"llm_value_{random.randint(0, 1_000_000)}"
+        fixed_value = fallback
+
+    return trial.suggest_categorical(name, [fixed_value])
 
 
 def update_best(

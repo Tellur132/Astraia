@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 import json
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Mapping
 
 from astraia.llm_guidance import LLMProposalGenerator, PromptCache
 from astraia.llm_providers import LLMResult, LLMUsage, LLMUsageLogger
@@ -37,6 +37,12 @@ def make_search_space() -> dict[str, dict[str, Any]]:
     }
 
 
+def make_search_space_with_llm_only() -> dict[str, dict[str, Any]]:
+    space = make_search_space()
+    space["circuit_code"] = {"type": "llm_only", "default": "<llm>"}
+    return space
+
+
 def make_generator(
     responses: List[LLMResult],
     *,
@@ -44,14 +50,16 @@ def make_generator(
     base_temperature: float = 0.6,
     min_temperature: float = 0.2,
     max_retries: int = 2,
+    search_space: Mapping[str, Mapping[str, Any]] | None = None,
+    batch_size: int = 2,
 ) -> LLMProposalGenerator:
     provider = StubProvider(responses)
     usage_logger = LLMUsageLogger(tmp_path / "usage.csv")
     generator = LLMProposalGenerator(
-        search_space=make_search_space(),
+        search_space=search_space or make_search_space(),
         problem_summary="demo",
         objective="minimize",
-        batch_size=2,
+        batch_size=batch_size,
         base_temperature=base_temperature,
         min_temperature=min_temperature,
         max_retries=max_retries,
@@ -125,4 +133,26 @@ def test_strategy_updates_cache_key(tmp_path: Path) -> None:
     generator.update_strategy({"emphasis": "kl"})
     updated_key = generator._cache_key(2)
     assert initial_key != updated_key
+
+
+def test_llm_only_parameter_passes_through(tmp_path: Path) -> None:
+    payload = {
+        "proposals": [
+            {
+                "theta": 0.1,
+                "depth": 1,
+                "backend": "a",
+                "circuit_code": "OPENQASM 2.0;",
+            }
+        ]
+    }
+    generator = make_generator(
+        [result_from_payload(payload)],
+        tmp_path=tmp_path,
+        search_space=make_search_space_with_llm_only(),
+        batch_size=1,
+    )
+
+    proposals = generator.propose_batch(1)
+    assert proposals[0]["circuit_code"] == "OPENQASM 2.0;"
 

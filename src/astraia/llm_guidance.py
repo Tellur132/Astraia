@@ -501,6 +501,8 @@ class LLMProposalGenerator:
         if param_type == "categorical":
             choices = list(spec.get("choices", []))
             return {"enum": choices}
+        if param_type == "llm_only":
+            return {"type": "string"}
         return {}
 
     def _describe_parameter(self, name: str, spec: Mapping[str, Any]) -> str:
@@ -523,6 +525,8 @@ class LLMProposalGenerator:
         if param_type == "categorical":
             choices = ", ".join(map(str, spec.get("choices", [])))
             return f"- {name}: choice from {{{choices}}}"
+        if param_type == "llm_only":
+            return f"- {name}: free-form string filled by LLM"
         return f"- {name}: unknown specification"
 
     def _example_value(self, spec: Mapping[str, Any]) -> Any:
@@ -538,6 +542,11 @@ class LLMProposalGenerator:
         if param_type == "categorical":
             choices = spec.get("choices", [])
             return choices[0] if choices else None
+        if param_type == "llm_only":
+            default = spec.get("default")
+            if default is not None:
+                return default
+            return "example_value"
         return None
 
     def _parse_and_validate(
@@ -582,6 +591,8 @@ class LLMProposalGenerator:
                 validated[name] = self._validate_int(value, spec)
             elif p_type == "categorical":
                 validated[name] = self._validate_choice(value, spec)
+            elif p_type == "llm_only":
+                validated[name] = self._validate_llm_only(value, spec)
             else:
                 raise ValueError(f"Unsupported parameter type: {p_type}")
         return validated
@@ -644,6 +655,12 @@ class LLMProposalGenerator:
             raise ValueError("choice not in options")
         return value
 
+    def _validate_llm_only(self, value: Any, spec: Mapping[str, Any]) -> str:  # noqa: ARG002
+        text = str(value)
+        if not text:
+            raise ValueError("llm_only parameter must be non-empty")
+        return text
+
     def _random_proposal(self) -> Dict[str, Any]:
         proposal: Dict[str, Any] = {}
         for name, spec in self._search_space.items():
@@ -654,6 +671,8 @@ class LLMProposalGenerator:
                 proposal[name] = self._random_int(spec)
             elif p_type == "categorical":
                 proposal[name] = self._random_choice(spec)
+            elif p_type == "llm_only":
+                proposal[name] = self._random_llm_text(spec)
             else:
                 raise ValueError(f"Unsupported parameter type: {p_type}")
         return proposal
@@ -695,6 +714,12 @@ class LLMProposalGenerator:
         if not choices:
             raise ValueError("categorical parameter requires choices")
         return self._rng.choice(choices)
+
+    def _random_llm_text(self, spec: Mapping[str, Any]) -> str:
+        default = spec.get("default")
+        if isinstance(default, str) and default:
+            return default
+        return f"llm_candidate_{self._rng.randint(0, 1_000_000)}"
 
     def _ensure_unique_batch(
         self, proposals: Iterable[Mapping[str, Any]], *, expected: int
