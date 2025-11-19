@@ -1,0 +1,79 @@
+metadata:
+  name: qaoa_small
+  description: "2-qubit QAOA on a small MaxCut instance without LLMs"
+
+seed: 7
+
+search:
+  library: optuna
+  sampler: nsga2
+  n_trials: 24
+  multi_objective: true
+  metrics: [energy, depth]
+  directions: [minimize, minimize]
+  study_name: qaoa_small
+
+stopping:
+  max_trials: 24
+  max_time_minutes: 10
+
+planner:
+  enabled: false
+
+llm_guidance:
+  enabled: false
+
+meta_search:
+  enabled: false
+
+search_space:
+  n_layers:
+    type: int
+    low: 1
+    high: 3
+    log: false
+  gamma_0:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_0:
+    type: float
+    low: 0.0
+    high: 3.1416
+  gamma_1:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_1:
+    type: float
+    low: 0.0
+    high: 3.1416
+  gamma_2:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_2:
+    type: float
+    low: 0.0
+    high: 3.1416
+
+evaluator:
+  module: astraia.evaluators.qaoa
+  callable: create_qaoa_evaluator
+  num_qubits: 2
+  edges:
+    - [0, 1]
+
+report:
+  output_dir: reports
+  filename: qaoa_small.md
+  metrics:
+    - energy
+    - depth
+    - fidelity
+    - gate_count
+    - n_layers
+
+artifacts:
+  run_root: runs/qaoa_small
+  log_file: runs/qaoa_small/log.csv
