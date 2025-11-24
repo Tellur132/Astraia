@@ -593,6 +593,7 @@ class MetaSearchAdjuster:
             trials_completed=trials_completed,
         )
         context_json = context.to_json(indent=2)
+        quantum_summary = self._build_quantum_summary()
         example_payload = {
             "sampler": settings.sampler,
             "rescale": {"param_name": 0.5},
@@ -607,18 +608,31 @@ class MetaSearchAdjuster:
             "以下は共通フォーマットで提供される最適化状態の JSON です。",
             context_json,
             "---",
-            f"目的: {self._metric_name} を {self._direction.name.lower()}",
-            f"次の {self._interval} 試行に向けた探索方針を指示してください。",
-            "必ず JSON オブジェクトのみを出力し、キーは sampler, rescale, trial_budget, max_trials, patience, notes を使用してください。",
-            "rescale はパラメタ名をキー、0.05〜1.0 の縮小係数を値とするオブジェクトです。不要な場合は空オブジェクトにしてください。",
-            "trial_budget は総試行数上限、max_trials は絶対上限、patience は改善なし許容回数を指定します。",
-            "応答は meta_search_plan 関数の引数として Schema に完全準拠する JSON のみを返してください。",
-            "Schema:",
-            schema_text,
-            "例:",
-            json.dumps(example_payload, ensure_ascii=False, indent=2),
+            "量子回路向けの直近評価サマリ（fidelity/depth/gate_count, 失敗率）も参考にしてください。",
         ]
-
+        if quantum_summary is not None:
+            lines.extend(
+                [
+                    f"直近 {quantum_summary['window']} 試行の量子評価サマリ:",
+                    json.dumps(quantum_summary, ensure_ascii=False, indent=2),
+                ]
+            )
+        lines.extend(
+            [
+                "回路構造の変更方針、ゲート数を増減すべきか、チェーン/全結合など別アーキテクチャを試すべきかを日本語で短く述べてください。",
+                "そのうえで、次の探索方針を JSON で返してください。",
+                f"目的: {self._metric_name} を {self._direction.name.lower()}",
+                f"次の {self._interval} 試行に向けた探索方針を指示してください。",
+                "必ず JSON オブジェクトのみを出力し、キーは sampler, rescale, trial_budget, max_trials, patience, notes を使用してください。",
+                "rescale はパラメタ名をキー、0.05〜1.0 の縮小係数を値とするオブジェクトです。不要な場合は空オブジェクトにしてください。",
+                "trial_budget は総試行数上限、max_trials は絶対上限、patience は改善なし許容回数を指定します。",
+                "応答は meta_search_plan 関数の引数として Schema に完全準拠する JSON のみを返してください。",
+                "Schema:",
+                schema_text,
+                "例:",
+                json.dumps(example_payload, ensure_ascii=False, indent=2),
+            ]
+        )
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
 
@@ -740,6 +754,72 @@ class MetaSearchAdjuster:
             if math.isclose(record.value, best_value, rel_tol=1e-9, abs_tol=1e-9):
                 return record.number
         return None
+
+    def _build_quantum_summary(self) -> Dict[str, Any] | None:
+        """Summarise recent trials for circuit-specific signals."""
+
+        if not self._history:
+            return None
+
+        window = min(len(self._history), self._summary_window)
+        recent = list(self._history)[-window:]
+
+        metric_keys = {
+            "metric_fidelity": "fidelity",
+            "metric_depth": "depth",
+            "metric_gate_count": "gate_count",
+        }
+
+        metric_stats: Dict[str, Dict[str, float]] = {}
+        for key, label in metric_keys.items():
+            stats = self._summarise_metric(recent, metric_name=key)
+            if stats:
+                metric_stats[label] = stats
+
+        failure_count = sum(1 for record in recent if self._trial_failed(record.metrics))
+
+        if not metric_stats and failure_count == 0:
+            return None
+
+        summary: Dict[str, Any] = {"window": window, "metrics": metric_stats}
+        summary["failures"] = {
+            "count": failure_count,
+            "rate": failure_count / float(window),
+        }
+        return summary
+
+    def _summarise_metric(
+        self, records: Sequence[TrialRecord], *, metric_name: str
+    ) -> Dict[str, float]:
+        values: list[float] = []
+        for record in records:
+            metrics = self._normalise_metrics(record.metrics)
+            if metric_name not in metrics:
+                continue
+            try:
+                numeric = float(metrics[metric_name])
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(numeric) or math.isinf(numeric):
+                continue
+            values.append(numeric)
+        if not values:
+            return {}
+        return {
+            "latest": values[-1],
+            "min": min(values),
+            "max": max(values),
+            "mean": sum(values) / len(values),
+        }
+
+    def _trial_failed(self, metrics: Mapping[str, Any]) -> bool:
+        status = metrics.get("status")
+        if isinstance(status, str) and status.lower() != "ok":
+            return True
+        timed_out = metrics.get("timed_out")
+        if isinstance(timed_out, bool):
+            return timed_out
+        return bool(timed_out)
 
     def _parse_plan(
         self,
