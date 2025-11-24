@@ -1,5 +1,6 @@
 import json
 from collections import deque
+from typing import Any, Mapping, Sequence
 
 import optuna
 import pytest
@@ -92,6 +93,10 @@ def test_llm_plan_is_parsed() -> None:
             "trial_budget": 7,
             "max_trials": 9,
             "patience": 3,
+            "guidance": {
+                "directives": ["try wide ansatz"],
+                "search_space": {"alpha": {"high": 0.9}},
+            },
             "notes": "集中探索",
         },
         ensure_ascii=False,
@@ -117,6 +122,8 @@ def test_llm_plan_is_parsed() -> None:
     assert adjustment.trial_budget == 7
     assert adjustment.max_trials == 9
     assert adjustment.patience == 3
+    assert adjustment.guidance_directives == ["try wide ansatz"]
+    assert adjustment.search_space_overrides == {"alpha": {"high": 0.9}}
     assert adjustment.notes == "集中探索"
 
 
@@ -152,6 +159,52 @@ def test_apply_meta_adjustment_updates_settings() -> None:
     assert settings.patience == 2
     assert search_space["alpha"]["low"] > 0.0
     assert search_space["alpha"]["high"] < 1.0
+
+
+class DummyGenerator:
+    def __init__(self) -> None:
+        self.directives: list[str] = []
+        self.overrides: list[Mapping[str, Mapping[str, Any]]] = []
+
+    def apply_search_space_overrides(
+        self, overrides: Mapping[str, Mapping[str, Any]]
+    ) -> list[str]:
+        self.overrides.append(overrides)
+        return ["overrides applied"]
+
+    def apply_meta_directives(self, directives: Sequence[str]) -> None:
+        self.directives.extend(list(directives))
+
+
+def test_apply_meta_adjustment_updates_guidance_and_space() -> None:
+    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=12))
+    search_cfg: dict[str, object] = {"sampler": "tpe"}
+    search_space = {"alpha": {"type": "float", "low": 0.0, "high": 1.0}}
+    settings = SearchSettings(sampler="tpe", max_trials=10, trial_budget=10, patience=4)
+    generator = DummyGenerator()
+
+    adjustment = MetaAdjustment(
+        search_space_overrides={"alpha": {"high": 0.7}},
+        guidance_directives=["increase gate budget"],
+    )
+
+    messages = apply_meta_adjustment(
+        adjustment,
+        study=study,
+        search_cfg=search_cfg,
+        search_space=search_space,
+        best_params={"alpha": 0.5},
+        settings=settings,
+        trials_completed=3,
+        seed=13,
+        sampler_builder=build_sampler,
+        proposal_generator=generator,
+    )
+
+    assert search_space["alpha"]["high"] == 0.7
+    assert generator.directives == ["increase gate budget"]
+    assert any("search_space" in msg for msg in messages)
+    assert any("guidance" in msg for msg in messages)
 
 
 def test_policy_switches_sampler_after_stagnation() -> None:

@@ -237,6 +237,7 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                         trials_completed=trials_completed,
                         seed=seed,
                         sampler_builder=build_sampler,
+                        proposal_generator=proposal_generator,
                     )
                     if messages:
                         print(f"[meta:{adjustment.source}] " + " | ".join(messages))
