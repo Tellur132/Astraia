@@ -79,6 +79,31 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 
 いずれも `llm_guidance` と `meta_search` を無効化しているため、API キーを持っていない環境でも `astraia --config <file>` だけで動作します。実行後は `report.md` に Pareto front の代表解、`log_pareto.png` に散布図が埋め込まれます。
 
+## Quantum Circuit Design
+
+量子回路設計ワークフローを試す場合は量子向けの extra をインストールします。
+
+```bash
+pip install -e .[quantum]
+```
+
+### 代表的な設定ファイル
+
+- `configs/quantum/qft_fidelity_depth.yaml`: QFT 回路の忠実度と深さを同時に最適化するサンプル。`metric_fidelity` と `metric_depth` のトレードオフを確認できます。
+- `configs/quantum/qaoa_small.yaml`: 小規模 MaxCut を対象にした QAOA のチューニング例。`p`（レイヤー数）やミキサー角を探索し、`metric_energy` を最小化します。
+
+いずれも `astraia --config <path>` で実行でき、`--summarize` や `--as-json` で設定内容を事前確認できます。
+
+### 生成されるレポートの見方
+
+量子 evaluator を利用した実行でも成果物は `runs/<run_id>/` 配下に保存されます。
+
+- `log.csv`: 各トライアルのパラメタと `metric_fidelity` / `metric_depth` などの評価値。`visualize` サブコマンドで可視化可能です。
+- `report.md`: ベストトライアルの回路概要、メトリクスの推移、Pareto front（多目的時）、LLM クリティックの所見をまとめた Markdown。忠実度の収束や深さの削減がどのトライアルで達成されたかを確認できます。
+- `config_resolved.json`: 実行時に確定した evaluator 設定（ターゲットユニタリや真理値表の指定を含む）。
+
+`astraia visualize --type pareto --metric fidelity --metric depth --run-id <id>` で忠実度と深さの散布図を生成し、`report.md` からも参照できます。
+
 ## 生成される成果物
 
 | ファイル | 内容 |

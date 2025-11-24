@@ -25,12 +25,17 @@ src/astraia/_compat/pydantic.py
 src/astraia/evaluators/__init__.py
 src/astraia/evaluators/base.py
 src/astraia/evaluators/branin.py
+src/astraia/evaluators/circuit_fidelity.py
 src/astraia/evaluators/llm_template.py
+src/astraia/evaluators/qaoa.py
+src/astraia/evaluators/qft_fidelity.py
 src/astraia/evaluators/qgan_kl.py
 src/astraia/evaluators/zdt3.py
 src/astraia/llm_providers/__init__.py
 src/astraia/llm_providers/gemini.py
 src/astraia/llm_providers/openai.py
+tests/test_circuit_fidelity_evaluator.py
+tests/test_circuit_fidelity_property.py
 tests/test_cli_runs.py
 tests/test_cli_security.py
 tests/test_cli_visualize.py
