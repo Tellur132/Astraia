@@ -2,6 +2,7 @@ import json
 from collections import deque
 
 import optuna
+import pytest
 
 from astraia.meta_search import (
     MetaAdjustment,
@@ -251,6 +252,48 @@ def test_policy_rescale_triggers_on_metric_threshold() -> None:
     assert adjustment is not None
     assert adjustment.rescale == {"depth": 0.5}
     assert adjustment.source == "policy"
+
+
+def test_quantum_summary_reports_recent_failures() -> None:
+    adjuster = MetaSearchAdjuster(
+        interval=5,
+        summary_window=3,
+        direction=optuna.study.StudyDirection.MINIMIZE,
+        metric_name="fidelity",
+        search_space=make_search_space(),
+        llm_cfg=None,
+        seed=21,
+    )
+    settings = SearchSettings(sampler="tpe", max_trials=10, trial_budget=10, patience=5)
+
+    trials = [
+        {"metrics": {"metric_fidelity": 0.7, "metric_depth": 4, "metric_gate_count": 9, "status": "ok"}},
+        {"metrics": {"metric_fidelity": 0.75, "metric_depth": 5, "metric_gate_count": 10, "status": "error"}},
+        {"metrics": {"metric_fidelity": 0.8, "metric_depth": 6, "metric_gate_count": 12, "timed_out": False}},
+    ]
+
+    for idx, payload in enumerate(trials):
+        adjuster.register_trial(
+            trial_number=idx,
+            value=1.0 - payload["metrics"]["metric_fidelity"],
+            improved=True,
+            params={"alpha": 0.1 * (idx + 1)},
+            metrics=payload["metrics"],
+            best_value=0.1,
+            best_params={"alpha": 0.1},
+            trials_completed=idx + 1,
+            settings=settings,
+        )
+
+    summary = adjuster._build_quantum_summary()
+
+    assert summary is not None
+    assert summary["window"] == 3
+    assert summary["failures"]["count"] == 1
+    assert pytest.approx(summary["failures"]["rate"]) == 1 / 3
+    fidelity_stats = summary["metrics"].get("fidelity")
+    assert fidelity_stats is not None
+    assert fidelity_stats["latest"] == 0.8
 
 
 def test_de_sampler_runs_simple_optimization() -> None:
