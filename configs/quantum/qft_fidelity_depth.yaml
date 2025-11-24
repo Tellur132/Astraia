@@ -1,0 +1,56 @@
+metadata:
+  name: qft_fidelity_depth
+  description: >-
+    少量の量子ビットで QFT を近似合成し、忠実度を高めつつ回路の深さやゲート数を抑える
+    多目的最適化テンプレートです。ノイズモデルを指定すると error_probability も併せて記録します。
+seed: 123
+search:
+  library: optuna
+  sampler: nsga2
+  n_trials: 8
+  multi_objective: true
+  metrics:
+    - name: fidelity
+      direction: maximize
+    - name: depth
+      direction: minimize
+  study_name: qft_fidelity_depth
+stopping:
+  max_trials: 8
+  max_time_minutes: 5
+search_space:
+  phase_scale:
+    type: float
+    low: 0.1
+    high: 1.0
+  include_swaps:
+    type: categorical
+    choices: [true, false]
+  input_value:
+    type: int
+    low: 0
+    high: 7
+
+# 評価器の設定。num_qubits と noise_model は容易に調整できます。
+evaluator:
+  module: astraia.evaluators.qft_fidelity
+  callable: create_qft_synthesis_evaluator
+  num_qubits: 3
+  noise_model:
+    single_qubit_error_rate: 0.001
+    two_qubit_error_rate: 0.005
+    measurement_error_rate: 0.002
+    decoherence_per_depth: 0.0005
+
+report:
+  output_dir: reports
+  filename: qft_fidelity_depth.md
+  metrics:
+    - fidelity
+    - depth
+    - gate_count
+    - t_gate_count
+    - error_probability
+artifacts:
+  run_root: runs/qft_fidelity_depth
+  log_file: runs/qft_fidelity_depth/log.csv

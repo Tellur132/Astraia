@@ -67,6 +67,20 @@ class OptimizationConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.search.metric_names, ["kl", "depth"])
         self.assertEqual(config.search.direction_names, ["minimize", "minimize"])
 
+    def test_structured_metric_entries_are_supported(self) -> None:
+        data = make_base_config()
+        data["search"].pop("metric")
+        data["search"]["metrics"] = [
+            {"name": "fidelity", "direction": "maximize"},
+            {"name": "depth", "direction": "minimize"},
+        ]
+        data["search"]["multi_objective"] = True
+        data["report"]["metrics"] = ["fidelity", "depth"]
+
+        config = OptimizationConfig.model_validate(data)
+        self.assertEqual(config.search.metric_names, ["fidelity", "depth"])
+        self.assertEqual(config.search.direction_names, ["maximize", "minimize"])
+
     def test_metric_and_direction_length_must_match(self) -> None:
         data = make_base_config()
         data["search"]["multi_objective"] = True

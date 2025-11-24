@@ -44,3 +44,29 @@ class MultiObjectiveConfigSmokeTests(TestCase):
 
     def test_zdt3_config_runs(self) -> None:
         self._run_config("zdt3.yaml")
+
+    def test_qft_fidelity_depth_config_runs(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "quantum" / "qft_fidelity_depth.yaml"
+        config = cli.load_config(config_path)
+        config_dict = config.model_dump(mode="python")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            run_root = tmp_path / "runs" / config_dict["metadata"]["name"]
+            log_file = run_root / "log.csv"
+            report_dir = tmp_path / "reports"
+
+            artifacts = dict(config_dict.get("artifacts") or {})
+            artifacts["run_root"] = str(run_root)
+            artifacts["log_file"] = str(log_file)
+            config_dict["artifacts"] = artifacts
+
+            report_cfg = dict(config_dict.get("report") or {})
+            report_cfg["output_dir"] = str(report_dir)
+            config_dict["report"] = report_cfg
+
+            result = run_optimization(config_dict)
+
+        self.assertGreaterEqual(result.trials_completed, 1)
+        self.assertIsNotNone(result.pareto_front)
+        self.assertGreaterEqual(len(result.pareto_front or []), 1)

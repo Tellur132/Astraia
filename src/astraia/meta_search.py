@@ -804,6 +804,8 @@ class MetaSearchAdjuster:
             "metric_fidelity": "fidelity",
             "metric_depth": "depth",
             "metric_gate_count": "gate_count",
+            "metric_t_gate_count": "t_gate_count",
+            "metric_error_probability": "error_probability",
         }
 
         metric_stats: Dict[str, Dict[str, float]] = {}

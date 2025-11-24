@@ -523,16 +523,7 @@ def summarize_config(config: Dict[str, Any]) -> str:
 
 
 def _extract_objective_settings(search: Mapping[str, Any]) -> tuple[list[str], list[str], bool]:
-    metrics = _ensure_string_list(search.get("metrics"))
-    if not metrics:
-        metrics = _ensure_string_list(search.get("metric"))
-    directions = _ensure_string_list(search.get("directions"))
-    if not directions:
-        directions = _ensure_string_list(search.get("direction"))
-    if metrics and not directions:
-        directions = ["minimize"] * len(metrics)
-    elif len(directions) == 1 and len(metrics) > 1:
-        directions = directions * len(metrics)
+    metrics, directions = _parse_metric_definitions(search)
     multi_objective = bool(search.get("multi_objective")) or len(metrics) > 1
     return metrics, directions, multi_objective
 
@@ -556,9 +547,7 @@ def _extract_metric_names_from_config(config: Mapping[str, Any] | None) -> list[
     search = config.get("search")
     if not isinstance(search, Mapping):
         return []
-    metrics = _ensure_string_list(search.get("metrics"))
-    if not metrics:
-        metrics = _ensure_string_list(search.get("metric"))
+    metrics, _ = _parse_metric_definitions(search)
     return metrics
 
 
@@ -591,21 +580,90 @@ def _resolve_visualization_directions(
     if not isinstance(search, Mapping):
         return directions
 
-    metric_list = _ensure_string_list(search.get("metrics"))
-    if not metric_list:
-        metric_list = _ensure_string_list(search.get("metric"))
-    direction_list = _ensure_string_list(search.get("directions"))
-    if not direction_list:
-        direction_list = _ensure_string_list(search.get("direction"))
-
-    if metric_list and not direction_list:
-        direction_list = ["minimize"] * len(metric_list)
-    elif len(direction_list) == 1 and len(metric_list) > 1:
-        direction_list = direction_list * len(metric_list)
+    metric_list, direction_list = _parse_metric_definitions(search)
 
     for metric, direction in zip(metric_list, direction_list, strict=False):
         directions[str(metric)] = str(direction).lower()
     return directions
+
+
+def _parse_metric_definitions(search: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    metrics_value = search.get("metrics")
+    if metrics_value is None:
+        metrics_value = search.get("metric")
+    directions_value = search.get("directions")
+    if directions_value is None:
+        directions_value = search.get("direction")
+
+    entries: list[Any]
+    if isinstance(metrics_value, Sequence) and not isinstance(
+        metrics_value, (str, bytes, bytearray)
+    ):
+        entries = list(metrics_value)
+    elif metrics_value is None:
+        entries = []
+    else:
+        entries = [metrics_value]
+
+    metrics: list[str] = []
+    directions: list[str] = []
+    for idx, entry in enumerate(entries):
+        name, explicit_direction = _parse_metric_entry(entry)
+        metrics.append(name)
+        directions.append(
+            _normalise_direction_value(
+                explicit_direction,
+                default_source=directions_value,
+                idx=idx,
+                total=len(entries),
+            )
+        )
+
+    return metrics, directions
+
+
+def _parse_metric_entry(entry: Any) -> tuple[str, str | None]:
+    if isinstance(entry, Mapping):
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            raise SystemExit("search.metrics entries must include a non-empty 'name'")
+        direction = entry.get("direction")
+        return name, str(direction) if direction is not None else None
+
+    name = str(entry).strip()
+    if not name:
+        raise SystemExit("search.metric entries must be non-empty strings")
+    return name, None
+
+
+def _normalise_direction_value(
+    explicit: str | None,
+    *,
+    default_source: Any,
+    idx: int,
+    total: int,
+) -> str:
+    direction_value: Any
+    if explicit is not None:
+        direction_value = explicit
+    elif isinstance(default_source, Sequence) and not isinstance(
+        default_source, (str, bytes, bytearray)
+    ):
+        if not default_source:
+            raise SystemExit("search.directions must not be empty when provided")
+        if len(default_source) == 1:
+            direction_value = default_source[0]
+        elif idx < len(default_source):
+            direction_value = default_source[idx]
+        else:
+            raise SystemExit("search.directions must match the number of metrics")
+    else:
+        direction_value = default_source or "minimize"
+
+    direction = str(direction_value).lower().strip()
+    if direction not in {"minimize", "maximize"}:
+        raise SystemExit("search.direction entries must be 'minimize' or 'maximize'")
+    return direction
 
 
 def format_result(result: "OptimizationResult") -> str:
