@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import json
 import math
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Deque,
@@ -30,6 +31,9 @@ from .llm_interfaces import (
 )
 from .pareto_summary import ParetoSummaryGenerator
 from .llm_providers import LLMResult, Prompt, PromptMessage, ToolDefinition
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .llm_guidance import LLMProposalGenerator
 
 
 _SUPPORTED_META_SAMPLERS = {
@@ -75,6 +79,8 @@ class MetaAdjustment:
     trial_budget: int | None = None
     max_trials: int | None = None
     patience: int | None = None
+    guidance_directives: List[str] = field(default_factory=list)
+    search_space_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     notes: str | None = None
     source: str = "heuristic"
 
@@ -600,6 +606,10 @@ class MetaSearchAdjuster:
             "trial_budget": settings.trial_budget,
             "max_trials": settings.max_trials,
             "patience": settings.patience,
+            "guidance": {
+                "directives": ["次の20トライアルではV型アンサッツを試す"],
+                "search_space": {"max_gate": {"high": 18}},
+            },
             "notes": "Focus on promising regions while keeping exploration.",
         }
         schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
@@ -620,11 +630,13 @@ class MetaSearchAdjuster:
         lines.extend(
             [
                 "回路構造の変更方針、ゲート数を増減すべきか、チェーン/全結合など別アーキテクチャを試すべきかを日本語で短く述べてください。",
-                "そのうえで、次の探索方針を JSON で返してください。",
+                "そのうえで、次の探索方針を JSON で返してください。guidance.search_space には特定パラメタの上限変更など一時的な制約を記述できます。",
+                "guidance.directives には「次の20トライアルでは○○型アンサッツ」「CNOTの配置規則を変更」といった指示を短く列挙してください。",
                 f"目的: {self._metric_name} を {self._direction.name.lower()}",
                 f"次の {self._interval} 試行に向けた探索方針を指示してください。",
-                "必ず JSON オブジェクトのみを出力し、キーは sampler, rescale, trial_budget, max_trials, patience, notes を使用してください。",
+                "必ず JSON オブジェクトのみを出力し、キーは sampler, rescale, trial_budget, max_trials, patience, guidance, notes を使用してください。",
                 "rescale はパラメタ名をキー、0.05〜1.0 の縮小係数を値とするオブジェクトです。不要な場合は空オブジェクトにしてください。",
+                "guidance.search_space は {\"param\": {\"low\": .., \"high\": ..}} のように一時的な範囲変更を指定します。",
                 "trial_budget は総試行数上限、max_trials は絶対上限、patience は改善なし許容回数を指定します。",
                 "応答は meta_search_plan 関数の引数として Schema に完全準拠する JSON のみを返してください。",
                 "Schema:",
@@ -669,6 +681,30 @@ class MetaSearchAdjuster:
                         {"type": "integer", "minimum": 0},
                         {"type": "null"},
                     ]
+                },
+                "guidance": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "directives": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "search_space": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "low": {"type": "number"},
+                                    "high": {"type": "number"},
+                                    "step": {"type": "number"},
+                                    "choices": {"type": "array", "items": {}},
+                                    "default": {},
+                                },
+                            },
+                        },
+                    },
                 },
                 "notes": {"type": "string"},
             },
@@ -840,6 +876,7 @@ class MetaSearchAdjuster:
             "trial_budget",
             "max_trials",
             "patience",
+            "guidance",
             "notes",
         }
         if any(key not in allowed_keys for key in data.keys()):
@@ -884,6 +921,31 @@ class MetaSearchAdjuster:
             if patience_int >= 0:
                 adjustment.patience = patience_int
 
+        guidance = data.get("guidance")
+        if isinstance(guidance, Mapping):
+            directives_payload = guidance.get("directives")
+            if isinstance(directives_payload, Sequence) and not isinstance(
+                directives_payload, (str, bytes, bytearray)
+            ):
+                directives: list[str] = []
+                for entry in directives_payload:
+                    text = str(entry).strip()
+                    if text:
+                        directives.append(text)
+                adjustment.guidance_directives = directives
+
+            overrides_payload = guidance.get("search_space")
+            if isinstance(overrides_payload, Mapping):
+                for name, override in overrides_payload.items():
+                    if not isinstance(override, Mapping):
+                        continue
+                    cleaned: Dict[str, Any] = {}
+                    for key in ("low", "high", "step", "choices", "default"):
+                        if key in override:
+                            cleaned[key] = override[key]
+                    if cleaned:
+                        adjustment.search_space_overrides[str(name)] = cleaned
+
         notes = data.get("notes")
         if isinstance(notes, str) and notes.strip():
             adjustment.notes = notes.strip()
@@ -894,6 +956,8 @@ class MetaSearchAdjuster:
             or adjustment.trial_budget is not None
             or adjustment.max_trials is not None
             or adjustment.patience is not None
+            or adjustment.guidance_directives
+            or adjustment.search_space_overrides
             or adjustment.notes
         ):
             return adjustment
@@ -948,10 +1012,65 @@ def apply_meta_adjustment(
     trials_completed: int,
     seed: int | None,
     sampler_builder: Callable[[Mapping[str, Any], int | None], optuna.samplers.BaseSampler],
+    proposal_generator: "LLMProposalGenerator" | None = None,
 ) -> list[str]:
     """Apply an adjustment and return human-readable change logs."""
 
     messages: list[str] = []
+
+    def _apply_override(spec: MutableMapping[str, Any], payload: Mapping[str, Any]) -> str | None:
+        param_type = spec.get("type")
+        if param_type == "float":
+            try:
+                low = float(payload.get("low", spec.get("low", 0.0)))
+                high = float(payload.get("high", spec.get("high", 0.0)))
+            except (TypeError, ValueError):
+                return None
+            if high <= low:
+                return None
+            spec["low"] = low
+            spec["high"] = high
+            step_value = payload.get("step")
+            if step_value is not None:
+                try:
+                    step = float(step_value)
+                except (TypeError, ValueError):
+                    step = None
+                if step is not None and step > 0:
+                    spec["step"] = step
+            return f"range=[{low}, {high}]"
+        if param_type == "int":
+            try:
+                low = int(payload.get("low", spec.get("low", 0)))
+                high = int(payload.get("high", spec.get("high", 0)))
+            except (TypeError, ValueError):
+                return None
+            if high <= low:
+                return None
+            spec["low"] = low
+            spec["high"] = high
+            step_value = payload.get("step")
+            if step_value is not None:
+                try:
+                    step = int(step_value)
+                except (TypeError, ValueError):
+                    step = None
+                if step is not None and step > 0:
+                    spec["step"] = step
+            return f"range=[{low}, {high}]"
+        if param_type == "categorical":
+            choices = payload.get("choices")
+            if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+                new_choices = [item for item in choices if item is not None]
+                if new_choices:
+                    spec["choices"] = list(new_choices)
+                    return f"choices={len(new_choices)}"
+        if param_type == "llm_only":
+            default = payload.get("default")
+            if isinstance(default, str) and default.strip():
+                spec["default"] = default.strip()
+                return "default updated"
+        return None
 
     if adjustment.sampler and adjustment.sampler != settings.sampler:
         new_cfg = dict(search_cfg)
@@ -1013,6 +1132,29 @@ def apply_meta_adjustment(
                 rescaled.append(f"{name}×{factor_value:.2f}")
         if rescaled:
             messages.append("rescale: " + ", ".join(rescaled))
+
+    if adjustment.search_space_overrides:
+        overrides_applied: list[str] = []
+        for name, payload in adjustment.search_space_overrides.items():
+            spec = search_space.get(name)
+            if spec is None:
+                continue
+            updated = _apply_override(spec, payload)
+            if updated:
+                overrides_applied.append(f"{name}: {updated}")
+        if overrides_applied:
+            messages.append("search_space: " + ", ".join(overrides_applied))
+        if proposal_generator is not None:
+            generator_logs = proposal_generator.apply_search_space_overrides(
+                adjustment.search_space_overrides
+            )
+            if generator_logs:
+                messages.append("llm_guidance: " + ", ".join(generator_logs))
+
+    if adjustment.guidance_directives:
+        if proposal_generator is not None:
+            proposal_generator.apply_meta_directives(adjustment.guidance_directives)
+        messages.append("guidance updated")
 
     if adjustment.max_trials is not None:
         new_max = max(trials_completed, int(adjustment.max_trials))

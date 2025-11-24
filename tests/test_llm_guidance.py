@@ -156,3 +156,19 @@ def test_llm_only_parameter_passes_through(tmp_path: Path) -> None:
     proposals = generator.propose_batch(1)
     assert proposals[0]["circuit_code"] == "OPENQASM 2.0;"
 
+
+def test_apply_search_space_overrides(tmp_path: Path) -> None:
+    generator = make_generator([], tmp_path=tmp_path)
+
+    updates = generator.apply_search_space_overrides(
+        {
+            "theta": {"low": -0.25, "high": 0.25},
+            "backend": {"choices": ["a", "b"]},
+        }
+    )
+
+    assert generator._search_space["theta"]["low"] == -0.25  # type: ignore[attr-defined]
+    assert generator._search_space["theta"]["high"] == 0.25  # type: ignore[attr-defined]
+    assert generator._search_space["backend"]["choices"] == ["a", "b"]  # type: ignore[attr-defined]
+    assert any("theta" in entry for entry in updates)
+

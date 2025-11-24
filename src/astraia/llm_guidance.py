@@ -279,6 +279,7 @@ class LLMProposalGenerator:
         self._seen_hashes: set[str] = set()
         self._context: LLMRunContext | None = None
         self._strategy_payload: Dict[str, Any] | None = None
+        self._meta_directives: list[str] = []
 
     @property
     def batch_size(self) -> int:
@@ -343,6 +344,48 @@ class LLMProposalGenerator:
 
         self._strategy_payload = dict(strategy) if strategy is not None else None
 
+    def apply_meta_directives(self, directives: Iterable[str]) -> None:
+        """Persist meta-search directives to be surfaced in prompts."""
+
+        cleaned: list[str] = []
+        for directive in directives:
+            text = str(directive).strip()
+            if text:
+                cleaned.append(text)
+        self._meta_directives = cleaned
+
+    def apply_search_space_overrides(
+        self, overrides: Mapping[str, Mapping[str, Any]]
+    ) -> list[str]:
+        """Update the internal search space with temporary constraints."""
+
+        updates: list[str] = []
+        for name, payload in overrides.items():
+            spec = self._search_space.get(name)
+            if spec is None:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            param_type = spec.get("type")
+            if param_type == "float":
+                updated = self._apply_numeric_override(spec, payload, is_int=False)
+            elif param_type == "int":
+                updated = self._apply_numeric_override(spec, payload, is_int=True)
+            elif param_type == "categorical":
+                updated = self._apply_choice_override(spec, payload)
+            elif param_type == "llm_only":
+                updated = self._apply_llm_only_override(spec, payload)
+            else:
+                continue
+            if updated:
+                updates.append(f"{name}: {updated}")
+
+        if updates:
+            self._schema_cache.clear()
+            self._tool_cache.clear()
+            self._seen_hashes.clear()
+        return updates
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -354,8 +397,9 @@ class LLMProposalGenerator:
         signature = json.dumps(self._search_space, sort_keys=True, ensure_ascii=False)
         context_hash = self._current_context().fingerprint()
         strategy_hash = self._strategy_hash()
+        meta_hash = self._meta_hash()
         return (
-            f"{count}::{self._problem_summary}::{self._objective}::{signature}::{context_hash}::{strategy_hash}"
+            f"{count}::{self._problem_summary}::{self._objective}::{signature}::{context_hash}::{strategy_hash}::{meta_hash}"
         )
 
     def _build_prompt(self, count: int) -> Prompt:
@@ -372,6 +416,12 @@ class LLMProposalGenerator:
             lines.extend([
                 "プランナーからのバッチ指示:",
                 strategy_json,
+                "",
+            ])
+        if self._meta_directives:
+            lines.extend([
+                "メタ探索コントローラからの直近指示:",
+                "- " + "\n- ".join(self._meta_directives),
                 "",
             ])
         lines.extend(
@@ -422,6 +472,12 @@ class LLMProposalGenerator:
         if self._strategy_payload is None:
             return "no-strategy"
         canonical = json.dumps(self._strategy_payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _meta_hash(self) -> str:
+        if not self._meta_directives:
+            return "no-meta-directives"
+        canonical = json.dumps(sorted(self._meta_directives), ensure_ascii=False)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _current_context(self) -> LLMRunContext:
@@ -547,6 +603,55 @@ class LLMProposalGenerator:
             if default is not None:
                 return default
             return "example_value"
+        return None
+
+    def _apply_numeric_override(
+        self, spec: MutableMapping[str, Any], payload: Mapping[str, Any], *, is_int: bool
+    ) -> str | None:
+        try:
+            base_low = spec.get("low") if spec.get("low") is not None else 0
+            base_high = spec.get("high") if spec.get("high") is not None else 0
+            new_low = base_low if "low" not in payload else (int(payload["low"]) if is_int else float(payload["low"]))
+            new_high = base_high if "high" not in payload else (int(payload["high"]) if is_int else float(payload["high"]))
+        except (TypeError, ValueError):
+            return None
+
+        if new_high is None or new_low is None:
+            return None
+        if float(new_high) <= float(new_low):
+            return None
+
+        spec["low"] = int(new_low) if is_int else float(new_low)
+        spec["high"] = int(new_high) if is_int else float(new_high)
+
+        if "step" in payload:
+            try:
+                step_value = int(payload["step"]) if is_int else float(payload["step"])
+            except (TypeError, ValueError):
+                step_value = None
+            if step_value is not None and step_value > 0:
+                spec["step"] = step_value
+
+        return f"range=[{spec['low']}, {spec['high']}]"
+
+    def _apply_choice_override(
+        self, spec: MutableMapping[str, Any], payload: Mapping[str, Any]
+    ) -> str | None:
+        choices = payload.get("choices")
+        if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+            new_choices = [item for item in choices if item is not None]
+            if new_choices:
+                spec["choices"] = list(new_choices)
+                return f"choices={len(new_choices)}"
+        return None
+
+    def _apply_llm_only_override(
+        self, spec: MutableMapping[str, Any], payload: Mapping[str, Any]
+    ) -> str | None:
+        default = payload.get("default")
+        if isinstance(default, str) and default.strip():
+            spec["default"] = default.strip()
+            return "default updated"
         return None
 
     def _parse_and_validate(
