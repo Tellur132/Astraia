@@ -1,4 +1,4 @@
-# Astraia MVP Skeleton
+# Astraia MVP
 
 「Astraia」は、YAML 設定で定義した評価器・探索空間を読み込んで Optuna ベースの探索ループを自動生成し、CSV/Markdown/LLM レポート、Pareto サマリ、PNG 可視化などの成果物を残す LLM 駆動最適化フレームワークです。本リポジトリには MVP（最小実行可能プロダクト）のソースコードと、誰でもすぐに試せる qGAN KL 最適化のサンプルが含まれています。
 
