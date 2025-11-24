@@ -31,6 +31,24 @@ evaluator:
 
 いずれも `pip install -e .[quantum]` で依存関係を満たした後、`astraia --config <file>` で即座に実行できます。`--summarize` / `--as-json` は設定検証のみを行うため、LLM なしで動作確認したい場合に便利です。
 
+## NISQ ノイズシミュレーションとの比較
+
+`noise_simulation` ブロックを設定すると、Aer の密度行列シミュレータを使って「ノイズあり」状態を併せて計算し、理想状態とのギャップを記録できます。
+
+```yaml
+evaluator:
+  module: astraia.evaluators.qaoa
+  callable: create_qaoa_evaluator
+  noise_simulation:
+    enabled: true        # false でノイズ計算をスキップ
+    label: nisq_mock     # ログ用の任意ラベル
+    single_qubit_depolarizing: 0.001
+    two_qubit_depolarizing: 0.01
+    readout_error: 0.02
+```
+
+QFT テンプレートでは `metric_fidelity_noisy` / `metric_fidelity_delta`、QAOA テンプレートではさらに `metric_energy_noisy` / `metric_energy_delta` が得られます。`report.metrics` にこれらを追加すると `log.csv` やレポートで理想・ノイズありを並べて確認できます。
+
 ## レポートと可視化
 
 量子 evaluator の実行結果は `runs/<run_id>/` に保存されます。

@@ -11,6 +11,7 @@ from qiskit.circuit.library import QFT
 from qiskit.quantum_info import Statevector, state_fidelity
 
 from .base import EvaluatorResult
+from .noise_simulation import NISQNoiseConfig, simulate_noisy_density_matrix
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class QFTFidelityEvaluator:
 
     num_qubits: int = 3
     noise_model: SimpleNoiseModel | None = None
+    noise_simulation: NISQNoiseConfig | None = None
 
     def __call__(self, params: Mapping[str, Any], seed: int | None = None) -> EvaluatorResult:  # noqa: ARG002 - seed reserved
         start = time.perf_counter()
@@ -144,6 +146,26 @@ class QFTFidelityEvaluator:
         if self.noise_model is not None:
             error_probability = self.noise_model.estimate_error_probability(stats)
 
+        noise_metrics: dict[str, Any] = {}
+        if self.noise_simulation is not None and self.noise_simulation.enabled:
+            try:
+                noisy_state = simulate_noisy_density_matrix(
+                    approx, self.noise_simulation, seed=seed
+                )
+                noisy_fidelity = float(state_fidelity(noisy_state, target_state))
+                noise_metrics = {
+                    "metric_fidelity_noisy": noisy_fidelity,
+                    "metric_fidelity_delta": fidelity - noisy_fidelity,
+                    "noise_model_label": self.noise_simulation.label,
+                    "noise_status": "ok",
+                }
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                noise_metrics = {
+                    "noise_status": "error",
+                    "noise_model_label": self.noise_simulation.label,
+                    "noise_error": str(exc),
+                }
+
         elapsed = time.perf_counter() - start
         return {
             "metric_fidelity": fidelity,
@@ -155,6 +177,7 @@ class QFTFidelityEvaluator:
             "include_swaps": include_swaps,
             "status": "ok",
             "elapsed_seconds": elapsed,
+            **noise_metrics,
         }
 
 
@@ -173,7 +196,12 @@ def _build_noise_model(config: Mapping[str, Any] | None) -> SimpleNoiseModel | N
 def create_qft_fidelity_evaluator(config: Mapping[str, Any]) -> QFTFidelityEvaluator:
     num_qubits = int(config.get("num_qubits", 3))
     noise_model = _build_noise_model(config.get("noise_model"))
-    return QFTFidelityEvaluator(num_qubits=num_qubits, noise_model=noise_model)
+    noise_simulation = NISQNoiseConfig.from_mapping(config.get("noise_simulation"))
+    return QFTFidelityEvaluator(
+        num_qubits=num_qubits,
+        noise_model=noise_model,
+        noise_simulation=noise_simulation,
+    )
 
 
 def create_qft_synthesis_evaluator(config: Mapping[str, Any]) -> QFTFidelityEvaluator:

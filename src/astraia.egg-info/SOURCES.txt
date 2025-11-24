@@ -27,6 +27,7 @@ src/astraia/evaluators/base.py
 src/astraia/evaluators/branin.py
 src/astraia/evaluators/circuit_fidelity.py
 src/astraia/evaluators/llm_template.py
+src/astraia/evaluators/noise_simulation.py
 src/astraia/evaluators/qaoa.py
 src/astraia/evaluators/qft_fidelity.py
 src/astraia/evaluators/qgan_kl.py
@@ -46,6 +47,7 @@ tests/test_llm_guidance.py
 tests/test_llm_usage.py
 tests/test_meta_search.py
 tests/test_multiobj_configs.py
+tests/test_noise_simulation_config.py
 tests/test_openai_provider.py
 tests/test_optimization_helpers.py
 tests/test_pareto_report.py

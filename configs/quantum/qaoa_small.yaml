@@ -63,6 +63,12 @@ evaluator:
   num_qubits: 2
   edges:
     - [0, 1]
+  noise_simulation:
+    enabled: true        # false にするとノイズシミュレーションをスキップ
+    label: nisq_mock     # ログ上で識別しやすい任意ラベル
+    single_qubit_depolarizing: 0.001
+    two_qubit_depolarizing: 0.01
+    readout_error: 0.02
 
 report:
   output_dir: reports
@@ -71,6 +77,9 @@ report:
     - energy
     - depth
     - fidelity
+    - energy_noisy
+    - fidelity_noisy
+    - fidelity_delta
     - gate_count
     - n_layers
 

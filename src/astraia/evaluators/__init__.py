@@ -9,6 +9,7 @@ from .base import (
     MetricValue,
 )
 from .circuit_fidelity import CircuitFidelityEvaluator, create_circuit_fidelity_evaluator
+from .noise_simulation import NISQNoiseConfig
 from .qaoa import QAOAEvaluator, create_qaoa_evaluator
 from .qft_fidelity import QFTFidelityEvaluator, create_qft_fidelity_evaluator
 from .qgan_kl import QGANKLEvaluator, create_evaluator
@@ -25,6 +26,7 @@ __all__ = [
     "QGANKLEvaluator",
     "QAOAEvaluator",
     "QFTFidelityEvaluator",
+    "NISQNoiseConfig",
     "create_circuit_fidelity_evaluator",
     "create_evaluator",
     "create_qaoa_evaluator",

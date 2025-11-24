@@ -89,8 +89,8 @@ pip install -e .[quantum]
 
 ### 代表的な設定ファイル
 
-- `configs/quantum/qft_fidelity_depth.yaml`: QFT 回路の忠実度と深さを同時に最適化するサンプル。`metric_fidelity` と `metric_depth` のトレードオフを確認できます。
-- `configs/quantum/qaoa_small.yaml`: 小規模 MaxCut を対象にした QAOA のチューニング例。`p`（レイヤー数）やミキサー角を探索し、`metric_energy` を最小化します。
+- `configs/quantum/qft_fidelity_depth.yaml`: QFT 回路の忠実度と深さを同時に最適化するサンプル。`noise_simulation` を有効にすると `metric_fidelity_noisy` / `metric_fidelity_delta` で理想状態とのギャップを記録できます。
+- `configs/quantum/qaoa_small.yaml`: 小規模 MaxCut を対象にした QAOA のチューニング例。`p`（レイヤー数）やミキサー角を探索し、`metric_energy` を最小化します。ノイズを模したシミュレーションを追加で走らせ、`metric_energy_noisy` などで比較可能です。
 
 いずれも `astraia --config <path>` で実行でき、`--summarize` や `--as-json` で設定内容を事前確認できます。
 

@@ -11,6 +11,7 @@ from qiskit import QuantumCircuit
 from qiskit.quantum_info import SparsePauliOp, Statevector, state_fidelity
 
 from .base import EvaluatorResult
+from .noise_simulation import NISQNoiseConfig, simulate_noisy_density_matrix
 
 Edge = Tuple[int, int]
 
@@ -71,6 +72,7 @@ class QAOAEvaluator:
 
     num_qubits: int = 2
     edges: Tuple[Edge, ...] = ((0, 1),)
+    noise_simulation: NISQNoiseConfig | None = None
 
     def __call__(self, params: Mapping[str, Any], seed: int | None = None) -> EvaluatorResult:  # noqa: ARG002 - seed reserved
         start = time.perf_counter()
@@ -95,6 +97,29 @@ class QAOAEvaluator:
         depth = float(circuit.depth() or 0)
         gate_count = float(len(circuit.data))
 
+        noise_metrics: dict[str, Any] = {}
+        if self.noise_simulation is not None and self.noise_simulation.enabled:
+            try:
+                noisy_state = simulate_noisy_density_matrix(
+                    circuit, self.noise_simulation, seed=seed
+                )
+                noisy_energy = float(np.real(noisy_state.expectation_value(cost_operator)))
+                noisy_fidelity = float(state_fidelity(noisy_state, target))
+                noise_metrics = {
+                    "metric_energy_noisy": noisy_energy,
+                    "metric_fidelity_noisy": noisy_fidelity,
+                    "metric_energy_delta": noisy_energy - energy,
+                    "metric_fidelity_delta": fidelity - noisy_fidelity,
+                    "noise_model_label": self.noise_simulation.label,
+                    "noise_status": "ok",
+                }
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                noise_metrics = {
+                    "noise_status": "error",
+                    "noise_model_label": self.noise_simulation.label,
+                    "noise_error": str(exc),
+                }
+
         elapsed = time.perf_counter() - start
         return {
             "metric_fidelity": fidelity,
@@ -104,13 +129,19 @@ class QAOAEvaluator:
             "n_layers": float(n_layers),
             "status": "ok",
             "elapsed_seconds": elapsed,
+            **noise_metrics,
         }
 
 
 def create_qaoa_evaluator(config: Mapping[str, Any]) -> QAOAEvaluator:
     num_qubits = int(config.get("num_qubits", 2))
     edges = tuple(tuple(edge) for edge in config.get("edges", ((0, 1),)))
-    return QAOAEvaluator(num_qubits=num_qubits, edges=edges)  # type: ignore[arg-type]
+    noise_cfg = NISQNoiseConfig.from_mapping(config.get("noise_simulation"))
+    return QAOAEvaluator(
+        num_qubits=num_qubits,
+        edges=edges,  # type: ignore[arg-type]
+        noise_simulation=noise_cfg,
+    )
 
 
 __all__ = ["QAOAEvaluator", "create_qaoa_evaluator"]

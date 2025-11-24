@@ -25,7 +25,7 @@ Provides-Extra: quantum
 Requires-Dist: qiskit>=1.0; extra == "quantum"
 Requires-Dist: qiskit-qasm3-import>=0.5; extra == "quantum"
 
-# Astraia MVP Skeleton
+# Astraia MVP
 
 「Astraia」は、YAML 設定で定義した評価器・探索空間を読み込んで Optuna ベースの探索ループを自動生成し、CSV/Markdown/LLM レポート、Pareto サマリ、PNG 可視化などの成果物を残す LLM 駆動最適化フレームワークです。本リポジトリには MVP（最小実行可能プロダクト）のソースコードと、誰でもすぐに試せる qGAN KL 最適化のサンプルが含まれています。
 
@@ -116,8 +116,8 @@ pip install -e .[quantum]
 
 ### 代表的な設定ファイル
 
-- `configs/quantum/qft_fidelity_depth.yaml`: QFT 回路の忠実度と深さを同時に最適化するサンプル。`metric_fidelity` と `metric_depth` のトレードオフを確認できます。
-- `configs/quantum/qaoa_small.yaml`: 小規模 MaxCut を対象にした QAOA のチューニング例。`p`（レイヤー数）やミキサー角を探索し、`metric_energy` を最小化します。
+- `configs/quantum/qft_fidelity_depth.yaml`: QFT 回路の忠実度と深さを同時に最適化するサンプル。`noise_simulation` を有効にすると `metric_fidelity_noisy` / `metric_fidelity_delta` で理想状態とのギャップを記録できます。
+- `configs/quantum/qaoa_small.yaml`: 小規模 MaxCut を対象にした QAOA のチューニング例。`p`（レイヤー数）やミキサー角を探索し、`metric_energy` を最小化します。ノイズを模したシミュレーションを追加で走らせ、`metric_energy_noisy` などで比較可能です。
 
 いずれも `astraia --config <path>` で実行でき、`--summarize` や `--as-json` で設定内容を事前確認できます。
 

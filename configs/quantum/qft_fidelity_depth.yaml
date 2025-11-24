@@ -41,12 +41,20 @@ evaluator:
     two_qubit_error_rate: 0.005
     measurement_error_rate: 0.002
     decoherence_per_depth: 0.0005
+  noise_simulation:
+    enabled: true
+    label: nisq_mock
+    single_qubit_depolarizing: 0.001
+    two_qubit_depolarizing: 0.01
+    readout_error: 0.02
 
 report:
   output_dir: reports
   filename: qft_fidelity_depth.md
   metrics:
     - fidelity
+    - fidelity_noisy
+    - fidelity_delta
     - depth
     - gate_count
     - t_gate_count
