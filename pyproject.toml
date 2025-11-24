@@ -11,6 +11,8 @@ dependencies = [
   "matplotlib>=3.8",
   "pandas>=2.2",
   "qiskit>=1.0",
+  "hypothesis>=6.100",
+  "qiskit-qasm3-import>=0.5",
 ]
 authors = [
   { name = "Astraia Dev Team" }
@@ -21,6 +23,7 @@ license = { text = "MIT" }
 openai = ["openai>=1.0"]
 gemini = ["google-generativeai>=0.5"]
 llm = ["openai>=1.0", "google-generativeai>=0.5"]
+quantum = ["qiskit>=1.0", "qiskit-qasm3-import>=0.5"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
