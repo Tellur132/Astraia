@@ -44,9 +44,9 @@ class SearchConfig(BaseModel):
     library: str = "optuna"
     sampler: str = "tpe"
     n_trials: int
-    direction: str | List[str] | None = "minimize"
-    metric: str | List[str] | None = None
-    metrics: List[str] | None = None
+    direction: str | List[str] | Mapping[str, Any] | None = "minimize"
+    metric: str | List[str] | Mapping[str, Any] | List[Mapping[str, Any]] | None = None
+    metrics: List[str | Mapping[str, Any]] | None = None
     directions: List[str] | None = None
     multi_objective: bool = False
     study_name: str | None = None
@@ -76,7 +76,7 @@ class SearchConfig(BaseModel):
 
         self.multi_objective = bool(self.multi_objective)
 
-        metrics = self._resolve_metric_names()
+        metrics, directions = self._resolve_metrics_and_directions()
         if not metrics:
             raise ValueError("search.metric must define at least one objective")
 
@@ -89,7 +89,6 @@ class SearchConfig(BaseModel):
                 "search.metrics must define at least two objectives when multi_objective is true"
             )
 
-        directions = self._resolve_direction_names(expected=len(metrics))
         if self.multi_objective and len(directions) != len(metrics):
             raise ValueError(
                 "search.directions must have the same number of entries as search.metrics"
@@ -129,63 +128,78 @@ class SearchConfig(BaseModel):
             return list(self.direction)
         return []
 
-    @staticmethod
-    def _normalise_sequence(value: str | List[str], *, field: str) -> List[str]:
-        if isinstance(value, str):
-            return [value]
-        if isinstance(value, list):
-            if not value:
-                raise ValueError(f"search.{field} must not be empty")
-            return list(value)
-        raise TypeError(f"search.{field} must be a string or list of strings")
-
-    def _resolve_metric_names(self) -> List[str]:
-        source: str | List[str] | None
-        field = "metric"
-        if self.metrics is not None:
-            source = self.metrics
-            field = "metrics"
-        else:
-            source = self.metric
-        if source is None:
+    def _resolve_metrics_and_directions(self) -> tuple[List[str], List[str]]:
+        metrics_source: Any = self.metrics if self.metrics is not None else self.metric
+        if metrics_source is None:
             raise ValueError("search.metric must be provided")
-        entries = self._normalise_sequence(source, field=field)
-        metrics: List[str] = []
-        for entry in entries:
-            metric_name = entry.strip()
-            if not metric_name:
-                raise ValueError(
-                    f"search.{field} entries must be non-empty strings"
-                )
-            metrics.append(metric_name)
-        return metrics
 
-    def _resolve_direction_names(self, *, expected: int) -> List[str]:
-        source: str | List[str] | None
-        field = "direction"
-        if self.directions is not None:
-            source = self.directions
-            field = "directions"
+        directions_source: Any = self.directions if self.directions is not None else self.direction
+        if directions_source is None:
+            directions_source = "minimize"
+
+        entries: List[Any]
+        if isinstance(metrics_source, list):
+            if not metrics_source:
+                raise ValueError("search.metrics must not be empty")
+            entries = list(metrics_source)
         else:
-            source = self.direction
-        if source is None:
-            source = "minimize"
-        entries = self._normalise_sequence(source, field=field)
+            entries = [metrics_source]
+
+        metrics: List[str] = []
         directions: List[str] = []
-        for entry in entries:
-            direction_name = entry.lower().strip()
-            if direction_name not in {"minimize", "maximize"}:
-                raise ValueError(
-                    f"search.{field} entries must be 'minimize' or 'maximize'"
+        for idx, entry in enumerate(entries):
+            metric_name, explicit_direction = self._parse_metric_entry(entry, idx)
+            metrics.append(metric_name)
+            directions.append(
+                self._normalise_direction(
+                    explicit_direction,
+                    default_source=directions_source,
+                    idx=idx,
+                    total=len(entries),
                 )
-            directions.append(direction_name)
-        if len(directions) == 1 and expected > 1:
-            directions = directions * expected
-        if len(directions) != expected:
-            raise ValueError(
-                "search.metric and search.directions must have the same number of entries"
             )
-        return directions
+        return metrics, directions
+
+    def _parse_metric_entry(self, entry: Any, idx: int) -> tuple[str, str | None]:
+        if isinstance(entry, Mapping):
+            metric_name = str(entry.get("name", "")).strip()
+            if not metric_name:
+                raise ValueError("search.metrics entries must include a non-empty 'name'")
+            direction = entry.get("direction")
+            return metric_name, str(direction) if direction is not None else None
+
+        metric_name = str(entry).strip()
+        if not metric_name:
+            raise ValueError("search.metric entries must be non-empty strings")
+        return metric_name, None
+
+    def _normalise_direction(
+        self,
+        explicit_direction: str | None,
+        *,
+        default_source: Any,
+        idx: int,
+        total: int,
+    ) -> str:
+        direction_value: Any
+        if explicit_direction is not None:
+            direction_value = explicit_direction
+        elif isinstance(default_source, list):
+            if not default_source:
+                raise ValueError("search.directions must not be empty when provided")
+            if len(default_source) == 1:
+                direction_value = default_source[0]
+            elif idx < len(default_source):
+                direction_value = default_source[idx]
+            else:
+                raise ValueError("search.directions must match the number of metrics")
+        else:
+            direction_value = default_source
+
+        direction = str(direction_value).lower().strip()
+        if direction not in {"minimize", "maximize"}:
+            raise ValueError("search.direction entries must be 'minimize' or 'maximize'")
+        return direction
 
 
 class StoppingConfig(BaseModel):
