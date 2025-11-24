@@ -76,7 +76,8 @@ class QAOAEvaluator:
 
     def __call__(self, params: Mapping[str, Any], seed: int | None = None) -> EvaluatorResult:  # noqa: ARG002 - seed reserved
         start = time.perf_counter()
-        n_layers = max(1, min(3, int(params.get("n_layers", 1))))
+        max_layers = 6
+        n_layers = max(1, min(int(params.get("n_layers", 1)), max_layers))
 
         circuit = QuantumCircuit(self.num_qubits)
         circuit.h(range(self.num_qubits))

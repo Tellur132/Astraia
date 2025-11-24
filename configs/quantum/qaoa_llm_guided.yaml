@@ -1,0 +1,130 @@
+metadata:
+  name: qaoa_llm_guided
+  description: "LLM-guided QAOA for a 4-qubit MaxCut ring with noise-aware metrics"
+
+seed: 11
+
+search:
+  library: optuna
+  sampler: nsga2
+  n_trials: 36
+  multi_objective: true
+  metrics:
+    - name: energy
+      direction: minimize
+    - name: depth
+      direction: minimize
+  study_name: qaoa_llm_guided
+
+stopping:
+  max_trials: 36
+  max_time_minutes: 15
+
+planner:
+  enabled: true
+  backend: llm
+  role: quantum_planner
+  prompt_template: planner_prompts/quantum_circuit_planner.md
+  config_path: planner_prompts/qaoa_planner_directives.md
+
+llm:
+  provider: openai
+  model: gpt-4.1-mini
+  usage_log: runs/qaoa_llm_guided/llm_usage.csv
+  max_calls: 80
+  max_tokens_per_run: 80000
+
+llm_guidance:
+  enabled: true
+  problem_summary: >
+    MaxCut on a 4-qubit ring (edges: 0-1, 1-2, 2-3, 3-0) using a QAOA ansatz with
+    p in [1,4]. Angles are gamma_i / beta_i in radians and feed into RZZ / RX
+    layers for each p.
+  objective: >
+    Propose n_layers and gamma/beta schedules that reduce expected cut energy
+    while keeping circuit depth small. Stay within the declared bounds and avoid
+    redundant proposals.
+  n_proposals: 4
+  max_retries: 2
+  base_temperature: 0.7
+  min_temperature: 0.35
+
+meta_search:
+  enabled: false
+
+llm_critic:
+  enabled: true
+  max_history: 120
+  prompt_preamble: "Review the QAOA MaxCut run and suggest next-step angle tweaks if convergence stalls."
+
+search_space:
+  n_layers:
+    type: int
+    low: 1
+    high: 4
+  gamma_0:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_0:
+    type: float
+    low: 0.0
+    high: 3.1416
+  gamma_1:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_1:
+    type: float
+    low: 0.0
+    high: 3.1416
+  gamma_2:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_2:
+    type: float
+    low: 0.0
+    high: 3.1416
+  gamma_3:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_3:
+    type: float
+    low: 0.0
+    high: 3.1416
+
+evaluator:
+  module: astraia.evaluators.qaoa
+  callable: create_qaoa_evaluator
+  num_qubits: 4
+  edges:
+    - [0, 1]
+    - [1, 2]
+    - [2, 3]
+    - [3, 0]
+  noise_simulation:
+    enabled: true
+    label: nisq_mock
+    single_qubit_depolarizing: 0.001
+    two_qubit_depolarizing: 0.01
+    readout_error: 0.02
+
+report:
+  output_dir: reports
+  filename: qaoa_llm_guided.md
+  metrics:
+    - energy
+    - energy_noisy
+    - energy_delta
+    - fidelity
+    - fidelity_noisy
+    - fidelity_delta
+    - depth
+    - gate_count
+    - n_layers
+
+artifacts:
+  run_root: runs/qaoa_llm_guided
+  log_file: runs/qaoa_llm_guided/log.csv
