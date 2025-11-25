@@ -28,6 +28,17 @@
 5. `astraia --dry-run` を実行して `.env` の必須キー検証と LLM プロバイダ疎通チェックを行い、ネットワークエラーや権限不足を事前に検知します。
 6. （任意）`pytest` で単体テストを実行して環境整合性を確認します。
 
+## 実験管理 GUI バックエンド（実験的）
+
+- FastAPI ベースの GUI バックエンドを `uvicorn main:app --reload` で起動できます。`ASTRAIA_CONFIG_ROOT` 環境変数を指定すると `configs/` の場所を任意に切り替えられます。
+- 現時点で提供するエンドポイント:
+  - `GET /health`: ヘルスチェック
+  - `GET /configs`: `configs/` 配下の YAML 一覧（パスとタグ）
+  - `GET /configs/{path}`: YAML 本文
+  - `GET /configs/{path}/as-json`: `OptimizationConfig` で検証済みの JSON
+  - `GET /configs/{path}/summary`: メトリクス・停止条件・探索空間のサマリ
+  - `GET /env/status`: 必須 LLM キーの有無を判定（値はマスク表示）
+
 ## クイックスタート：標準的なワークフロー
 
 1. **設定を確認**：`astraia --config configs/qgan_kl.yaml --summarize` でサマリ、`--as-json` でバリデーション済み JSON を確認します。
