@@ -1243,7 +1243,14 @@ class TrialLogger:
     ) -> None:
         self.path = path
         self.param_names = list(param_names)
-        self.metric_names = list(metric_names)
+        self.metric_names = [str(name) for name in metric_names]
+        self.metric_fields = [
+            (
+                name,
+                name if name.startswith("metric_") else f"metric_{name}",
+            )
+            for name in self.metric_names
+        ]
 
         write_header = not path.exists()
         self._fh = path.open("a", newline="", encoding="utf-8")
@@ -1252,7 +1259,7 @@ class TrialLogger:
             fieldnames=[
                 "trial",
                 *[f"param_{name}" for name in self.param_names],
-                *[f"metric_{name}" for name in self.metric_names],
+                *[field for _, field in self.metric_fields],
             ],
         )
         if write_header:
@@ -1267,10 +1274,29 @@ class TrialLogger:
         row: Dict[str, Any] = {"trial": trial_number}
         for name in self.param_names:
             row[f"param_{name}"] = params.get(name)
-        for name in self.metric_names:
-            row[f"metric_{name}"] = metrics.get(name)
+        for name, field in self.metric_fields:
+            row[field] = self._resolve_metric_value(metrics, name)
         self._writer.writerow(row)
         self._fh.flush()
+
+    @staticmethod
+    def _resolve_metric_value(
+        metrics: Mapping[str, MetricValue],
+        name: str,
+    ) -> MetricValue | None:
+        if name in metrics:
+            return metrics[name]
+
+        if name.startswith("metric_"):
+            bare_name = name.removeprefix("metric_")
+            if bare_name in metrics:
+                return metrics[bare_name]
+        else:
+            prefixed = f"metric_{name}"
+            if prefixed in metrics:
+                return metrics[prefixed]
+
+        return None
 
     def close(self) -> None:
         self._fh.close()

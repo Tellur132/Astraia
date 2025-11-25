@@ -1,8 +1,11 @@
 """Unit tests for optimization helper utilities."""
 from __future__ import annotations
 
+import csv
 import math
+import tempfile
 import unittest
+from pathlib import Path
 
 import optuna
 
@@ -46,6 +49,35 @@ class OptimizationHelperTests(unittest.TestCase):
         params = optimization.sample_params(trial, search_space)
 
         self.assertEqual(params["code"], "from LLM")
+
+
+class TrialLoggerTests(unittest.TestCase):
+    def test_logger_handles_prefixed_and_unprefixed_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "log.csv"
+            metrics = {
+                "metric_fidelity": 0.87,
+                "energy": -0.5,
+            }
+            params = {"width": 2}
+
+            with optimization.TrialLogger(
+                log_path,
+                params.keys(),
+                ["fidelity", "metric_energy"],
+            ) as logger:
+                logger.log(0, params, metrics)
+
+            with log_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertIn("metric_fidelity", row)
+        self.assertIn("metric_energy", row)
+        self.assertNotIn("metric_metric_energy", row)
+        self.assertAlmostEqual(float(row["metric_fidelity"]), 0.87)
+        self.assertAlmostEqual(float(row["metric_energy"]), -0.5)
 
 
 if __name__ == "__main__":
