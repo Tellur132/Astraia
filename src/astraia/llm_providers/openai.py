@@ -46,22 +46,35 @@ class OpenAIProvider:
             raise ProviderUnavailableError("openai package is not installed")
 
         messages = prompt.to_chat_messages(system=system)
+
+        # --- 追加: 推論モデル(GPT-5 系 / o1 / o3 / o4 系)かどうかを判定 ---
+        #   GPT-5 シリーズ + o1/o3/o4 系は reasoning model 扱いで、
+        #   temperature/top_p などが非対応のためリクエストに含めないようにする。
+        is_reasoning_model = _is_reasoning_model_name(self._model)
+
         response_kwargs: Dict[str, Any] = {
             "model": self._model,
             "input": messages,
         }
-        if temperature is not None:
-            response_kwargs["temperature"] = float(temperature)
-        if top_p is not None:
-            response_kwargs["top_p"] = float(top_p)
+
+        # --- 変更: 推論モデルでは temperature / top_p を投げない ---
+        if not is_reasoning_model:
+            if temperature is not None:
+                response_kwargs["temperature"] = float(temperature)
+            if top_p is not None:
+                response_kwargs["top_p"] = float(top_p)
+
         if json_mode:
+            # Responses API の JSON モード
+            # text.format.type を json_object にすると「必ず JSON」になる
             response_kwargs["text"] = {
                 "format": {
                     "type": "json_object",
                 }
             }
+
         if tool is not None:
-            # Responses API 用のツール定義
+            # Responses API 用のツール定義 (function calling)
             function_def = {
                 "type": "function",
                 "name": tool.name,
@@ -70,15 +83,13 @@ class OpenAIProvider:
                 # "strict": True,  # 必要なら strict にしたいときここを有効化
             }
 
-            # ここを変更: Chat Completions 形式ではなく、
-            # Responses API 形式で tools を渡す
+            # Chat Completions ではなく Responses API 形式で tools を渡す
             response_kwargs["tools"] = [function_def]
 
-            # ここを変更: tool_choice はシンプルに文字列で指定
-            # - "auto"    : モデルに任せる（デフォルト）
-            # - "required": 必ずツールを呼ばせる（今回はこちら推奨）
+            # tool_choice は文字列で指定
+            # - "auto"    : モデルに任せる
+            # - "required": 必ずツールを呼ばせる
             response_kwargs["tool_choice"] = "required"
-            # あるいは完全に省略してもよい（その場合はデフォルト "auto"）
 
         if stop:
             response_kwargs["stop"] = list(stop)
@@ -102,6 +113,26 @@ class OpenAIProvider:
             raise RuntimeError("OpenAI ping failed") from exc
 
 
+# --- 追加: 推論モデルかどうかを判定するヘルパ関数 ---
+def _is_reasoning_model_name(model: str) -> bool:
+    """
+    GPT-5 シリーズおよび o1 / o3 / o4 系モデルを「推論モデル」とみなすための簡易判定。
+
+    例:
+        gpt-5
+        gpt-5.1
+        gpt-5.1-mini
+        o1
+        o1-mini
+        o3
+        o3-mini
+        o4-mini
+    などを True にする。
+    """
+    prefixes = ("gpt-5", "o1", "o3", "o4")
+    return model.startswith(prefixes)
+
+
 def _extract_text(response: Any, *, expected_tool: ToolDefinition | None) -> tuple[str, str | None]:
     """Best-effort extraction of text content from an OpenAI response."""
 
@@ -111,6 +142,7 @@ def _extract_text(response: Any, *, expected_tool: ToolDefinition | None) -> tup
         if arguments is not None:
             return arguments, expected_tool.name
 
+    # Responses API のショートカット (output_text プロパティ)
     if hasattr(response, "output_text") and response.output_text is not None:
         return str(response.output_text), None
 
@@ -134,7 +166,7 @@ def _extract_tool_arguments(response: Any, *, tool_name: str) -> str | None:
     output = getattr(response, "output", None)
     if isinstance(output, Sequence):
         for block in output:
-            # ここを追加: Responses API の function_call 形式
+            # 追加: Responses API の function_call 形式
             block_type = getattr(block, "type", None)
             if block_type == "function_call":
                 name = getattr(block, "name", None)
@@ -187,6 +219,7 @@ def _extract_usage(response: Any, *, provider: str, model: str) -> LLMUsage | No
     if usage is None:
         return None
 
+    # GPT-5 / o1 / o3 系でも input_tokens / output_tokens / total_tokens は共通である想定
     prompt_tokens = getattr(usage, "input_tokens", None)
     completion_tokens = getattr(usage, "output_tokens", None)
     total_tokens = getattr(usage, "total_tokens", None)
