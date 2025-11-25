@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Mapping
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -15,7 +15,17 @@ from .config_service import (
     validate_config,
 )
 from .env_status import env_status
+from .run_service import (
+    RunOptions,
+    active_job_info,
+    dry_run_config,
+    list_runs as service_list_runs,
+    load_run_detail,
+    request_cancel,
+    start_run,
+)
 from astraia.config import ValidationError
+from astraia.tracking import RunMetadata
 
 
 class ConfigItem(BaseModel):
@@ -53,6 +63,69 @@ class ValidationProblem(BaseModel):
 
 class ValidationErrorResponse(BaseModel):
     errors: list[ValidationProblem]
+
+
+class RunOptionsPayload(BaseModel):
+    max_trials: int | None = Field(default=None, ge=1)
+    sampler: str | None = None
+    llm_enabled: bool | None = None
+
+
+class DryRunRequest(BaseModel):
+    config_path: str
+    run_id: str | None = None
+    options: RunOptionsPayload | None = None
+    ping_llm: bool = True
+
+
+class DryRunResponse(BaseModel):
+    run_id: str
+    config_path: str
+    config: dict[str, Any]
+
+
+class RunStartRequest(BaseModel):
+    config_path: str
+    run_id: str | None = None
+    options: RunOptionsPayload | None = None
+    perform_dry_run: bool = True
+    ping_llm: bool = True
+
+
+class RunStartResponse(BaseModel):
+    run_id: str
+    status: str
+    run_dir: str
+    meta_path: str
+
+
+class RunListItem(BaseModel):
+    run_id: str
+    status: str | None = None
+    created_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    report: dict[str, Any] = Field(default_factory=dict)
+    artifacts: dict[str, Any] = Field(default_factory=dict)
+    status_payload: dict[str, Any] = Field(default_factory=dict)
+    run_dir: str | None = None
+
+
+class JobInfo(BaseModel):
+    pid: int | None = None
+    state: str | None = None
+    cancel_requested: bool | None = None
+    started_at: str | None = None
+
+
+class RunDetailResponse(BaseModel):
+    meta: dict[str, Any]
+    config: dict[str, Any] | None = None
+    job: JobInfo | None = None
+
+
+class CancelResponse(BaseModel):
+    ok: bool
+    message: str
 
 
 def create_app() -> FastAPI:
@@ -134,6 +207,100 @@ def create_app() -> FastAPI:
     def get_env_status() -> dict[str, Any]:
         return env_status()
 
+    @app.post(
+        "/runs/dry-run",
+        response_model=DryRunResponse,
+        responses={status.HTTP_422_UNPROCESSABLE_ENTITY: {"model": ValidationErrorResponse}},
+    )
+    def post_runs_dry_run(payload: DryRunRequest) -> DryRunResponse:
+        try:
+            options = _options_from_payload(payload.options)
+            result = dry_run_config(
+                payload.config_path,
+                run_id=payload.run_id,
+                options=options,
+                ping_llm=payload.ping_llm,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ConfigLoadError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ValidationError as exc:
+            detail = ValidationErrorResponse(errors=_format_validation_errors(exc))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=detail.model_dump(),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        return DryRunResponse(
+            run_id=result.run_id,
+            config_path=str(result.config_path),
+            config=result.config,
+        )
+
+    @app.post(
+        "/runs",
+        response_model=RunStartResponse,
+        responses={status.HTTP_422_UNPROCESSABLE_ENTITY: {"model": ValidationErrorResponse}},
+    )
+    def post_runs(payload: RunStartRequest) -> RunStartResponse:
+        try:
+            options = _options_from_payload(payload.options)
+            launch = start_run(
+                payload.config_path,
+                run_id=payload.run_id,
+                options=options,
+                perform_dry_run=payload.perform_dry_run,
+                ping_llm=payload.ping_llm,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ConfigLoadError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ValidationError as exc:
+            detail = ValidationErrorResponse(errors=_format_validation_errors(exc))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=detail.model_dump(),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        return RunStartResponse(
+            run_id=launch.run_id,
+            status=launch.status,
+            run_dir=str(launch.run_dir),
+            meta_path=str(launch.meta_path),
+        )
+
+    @app.get("/runs", response_model=list[RunListItem])
+    def get_runs(status_filter: str | None = None) -> list[RunListItem]:
+        runs = service_list_runs(status_filter)
+        return [_serialize_run_metadata(entry) for entry in runs]
+
+    @app.get("/runs/{run_id}", response_model=RunDetailResponse)
+    def get_run_detail(run_id: str) -> RunDetailResponse:
+        try:
+            metadata, config = load_run_detail(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+        job = active_job_info(metadata.run_id)
+        job_payload = JobInfo(**job) if job else None
+        return RunDetailResponse(meta=metadata.raw, config=config, job=job_payload)
+
+    @app.post("/runs/{run_id}/cancel", response_model=CancelResponse)
+    def cancel_run(run_id: str) -> CancelResponse:
+        try:
+            active = request_cancel(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+        message = "Cancellation signal sent." if active else "Run was already finished."
+        return CancelResponse(ok=active, message=message)
+
     return app
 
 
@@ -159,3 +326,32 @@ def _config_root_or_error() -> Path:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
         ) from exc
+
+
+def _options_from_payload(payload: RunOptionsPayload | None) -> RunOptions | None:
+    if payload is None:
+        return None
+    return RunOptions(
+        max_trials=payload.max_trials,
+        sampler=payload.sampler,
+        llm_enabled=payload.llm_enabled,
+    )
+
+
+def _serialize_run_metadata(metadata: RunMetadata) -> RunListItem:
+    artifacts = {
+        key: str(value) for key, value in metadata.artifacts.items()
+    } if isinstance(metadata.artifacts, Mapping) else {}
+    status_payload = (
+        dict(metadata.status_payload) if isinstance(metadata.status_payload, Mapping) else {}
+    )
+    return RunListItem(
+        run_id=metadata.run_id,
+        status=metadata.status,
+        created_at=metadata.created_at.isoformat() if metadata.created_at else None,
+        metadata=dict(metadata.metadata),
+        report=dict(metadata.report),
+        artifacts=artifacts,
+        status_payload=status_payload,
+        run_dir=str(metadata.run_dir),
+    )
