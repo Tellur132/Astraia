@@ -35,6 +35,12 @@ src/astraia/evaluators/zdt3.py
 src/astraia/llm_providers/__init__.py
 src/astraia/llm_providers/gemini.py
 src/astraia/llm_providers/openai.py
+src/astraia_gui/__init__.py
+src/astraia_gui/backend/__init__.py
+src/astraia_gui/backend/app.py
+src/astraia_gui/backend/config_service.py
+src/astraia_gui/backend/env_status.py
+src/astraia_gui/backend/run_service.py
 tests/test_circuit_fidelity_evaluator.py
 tests/test_circuit_fidelity_property.py
 tests/test_cli_runs.py
@@ -42,6 +48,7 @@ tests/test_cli_security.py
 tests/test_cli_visualize.py
 tests/test_config_validation.py
 tests/test_evaluator_base.py
+tests/test_gui_backend.py
 tests/test_llm_critic.py
 tests/test_llm_guidance.py
 tests/test_llm_usage.py

@@ -9,6 +9,9 @@ Description-Content-Type: text/markdown
 Requires-Dist: pyyaml>=6.0
 Requires-Dist: optuna>=3.6
 Requires-Dist: pydantic>=2.5
+Requires-Dist: fastapi>=0.111
+Requires-Dist: uvicorn>=0.30
+Requires-Dist: httpx>=0.27
 Requires-Dist: matplotlib>=3.8
 Requires-Dist: pandas>=2.2
 Requires-Dist: qiskit>=1.0
@@ -54,6 +57,17 @@ Requires-Dist: qiskit-qasm3-import>=0.5; extra == "quantum"
 4. LLM API キーを `.env` に追記します（例: `OPENAI_API_KEY=sk-...`）。テンプレートは `.env.example` をコピーしてください。
 5. `astraia --dry-run` を実行して `.env` の必須キー検証と LLM プロバイダ疎通チェックを行い、ネットワークエラーや権限不足を事前に検知します。
 6. （任意）`pytest` で単体テストを実行して環境整合性を確認します。
+
+## 実験管理 GUI バックエンド（実験的）
+
+- FastAPI ベースの GUI バックエンドを `uvicorn main:app --reload` で起動できます。`ASTRAIA_CONFIG_ROOT` 環境変数を指定すると `configs/` の場所を任意に切り替えられます。
+- 現時点で提供するエンドポイント:
+  - `GET /health`: ヘルスチェック
+  - `GET /configs`: `configs/` 配下の YAML 一覧（パスとタグ）
+  - `GET /configs/{path}`: YAML 本文
+  - `GET /configs/{path}/as-json`: `OptimizationConfig` で検証済みの JSON
+  - `GET /configs/{path}/summary`: メトリクス・停止条件・探索空間のサマリ
+  - `GET /env/status`: 必須 LLM キーの有無を判定（値はマスク表示）
 
 ## クイックスタート：標準的なワークフロー
 

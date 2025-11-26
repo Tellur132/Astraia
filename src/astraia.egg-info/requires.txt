@@ -1,6 +1,9 @@
 pyyaml>=6.0
 optuna>=3.6
 pydantic>=2.5
+fastapi>=0.111
+uvicorn>=0.30
+httpx>=0.27
 matplotlib>=3.8
 pandas>=2.2
 qiskit>=1.0

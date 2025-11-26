@@ -1,21 +1,21 @@
 metadata:
   name: qaoa_small
-  description: "2-qubit QAOA on a small MaxCut instance without LLMs"
+  description: "QAOA for a 4-qubit MaxCut ring"
 
-seed: 7
+seed: 11
 
 search:
   library: optuna
   sampler: nsga2
-  n_trials: 24
+  n_trials: 36
   multi_objective: true
   metrics: [energy, depth]
   directions: [minimize, minimize]
   study_name: qaoa_small
 
 stopping:
-  max_trials: 24
-  max_time_minutes: 10
+  max_trials: 36
+  max_time_minutes: 15
 
 planner:
   enabled: false
@@ -30,8 +30,7 @@ search_space:
   n_layers:
     type: int
     low: 1
-    high: 3
-    log: false
+    high: 4
   gamma_0:
     type: float
     low: 0.0
@@ -56,15 +55,27 @@ search_space:
     type: float
     low: 0.0
     high: 3.1416
+  gamma_3:
+    type: float
+    low: 0.0
+    high: 3.1416
+  beta_3:
+    type: float
+    low: 0.0
+    high: 3.1416
+
 
 evaluator:
   module: astraia.evaluators.qaoa
   callable: create_qaoa_evaluator
-  num_qubits: 2
+  num_qubits: 4
   edges:
     - [0, 1]
+    - [1, 2]
+    - [2, 3]
+    - [3, 0]
   noise_simulation:
-    enabled: true        # false にするとノイズシミュレーションをスキップ
+    enabled: false        # false にするとノイズシミュレーションをスキップ
     label: nisq_mock     # ログ上で識別しやすい任意ラベル
     single_qubit_depolarizing: 0.001
     two_qubit_depolarizing: 0.01
@@ -75,11 +86,10 @@ report:
   filename: qaoa_small.md
   metrics:
     - energy
-    - depth
+    - energy_delta
     - fidelity
-    - energy_noisy
-    - fidelity_noisy
     - fidelity_delta
+    - depth
     - gate_count
     - n_layers
 
