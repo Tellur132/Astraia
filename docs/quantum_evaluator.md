@@ -35,6 +35,8 @@ evaluator:
 
 `noise_simulation` ブロックを設定すると、Aer の密度行列シミュレータを使って「ノイズあり」状態を併せて計算し、理想状態とのギャップを記録できます。
 
+ノイズシミュレーションには `qiskit-aer` が必要です。`pip install -e .[quantum]` を使うと Qiskit 本体と合わせて `qiskit-aer` も導入されるため、追加インストールなしで利用できます。
+
 ```yaml
 evaluator:
   module: astraia.evaluators.qaoa

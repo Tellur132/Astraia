@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +31,7 @@ class RunOptions:
     max_trials: int | None = None
     sampler: str | None = None
     llm_enabled: bool | None = None
+    seed: int | None = None
 
 
 @dataclass
@@ -44,6 +47,15 @@ class RunLaunch:
     run_dir: Path
     meta_path: Path
     status: str
+
+
+@dataclass
+class LlmComparisonLaunch:
+    comparison_id: str
+    seed: int | None
+    llm_enabled: RunLaunch
+    llm_disabled: RunLaunch
+    summary_path: Path | None = None
 
 
 @dataclass
@@ -127,6 +139,101 @@ def start_run(
         run_dir=run_dir,
         meta_path=handle.artifacts.meta_path,
         status="running",
+    )
+
+
+def start_llm_comparison(
+    config_path: str,
+    *,
+    run_id: str | None = None,
+    options: RunOptions | None = None,
+    runs_root: Path | None = None,
+    perform_dry_run: bool = True,
+    ping_llm: bool = True,
+) -> LlmComparisonLaunch:
+    """Launch paired LLM-on / LLM-off runs for apples-to-apples comparisons."""
+
+    base_options = options or RunOptions()
+    validated_path, validated_model = validate_config(config_path, root=get_config_root())
+    if base_options.llm_enabled is False:
+        raise ValueError("llm_comparison requires LLM features to remain enabled.")
+    if not _llm_available(validated_model):
+        raise ValueError("llm_comparison requested but config has no LLM settings.")
+
+    seed = _select_shared_seed(validated_model, base_options, requested_run_id=run_id)
+    llm_options = RunOptions(
+        max_trials=base_options.max_trials,
+        sampler=base_options.sampler,
+        llm_enabled=base_options.llm_enabled if base_options.llm_enabled is not False else None,
+        seed=seed,
+    )
+    llm_launch = start_run(
+        config_path,
+        run_id=run_id,
+        options=llm_options,
+        runs_root=runs_root,
+        perform_dry_run=perform_dry_run,
+        ping_llm=ping_llm,
+    )
+
+    baseline_run_id = _derive_baseline_run_id(llm_launch.run_id, _resolve_runs_root(runs_root))
+    baseline_options = RunOptions(
+        max_trials=base_options.max_trials,
+        sampler=base_options.sampler,
+        llm_enabled=False,
+        seed=seed,
+    )
+    baseline_launch = start_run(
+        config_path,
+        run_id=baseline_run_id,
+        options=baseline_options,
+        runs_root=runs_root,
+        perform_dry_run=perform_dry_run,
+        ping_llm=False,
+    )
+
+    comparison_id = f"{llm_launch.run_id}-llm-comparison"
+    comparison_path = _init_comparison_record(
+        comparison_id,
+        llm_launch,
+        baseline_launch,
+        validated_path,
+        seed=seed,
+        runs_root=_resolve_runs_root(runs_root),
+    )
+
+    _annotate_run_comparison(
+        llm_launch.meta_path,
+        comparison_id=comparison_id,
+        paired_run_id=baseline_launch.run_id,
+        seed=seed,
+        role="llm_enabled",
+        comparison_path=comparison_path,
+    )
+    _annotate_run_comparison(
+        baseline_launch.meta_path,
+        comparison_id=comparison_id,
+        paired_run_id=llm_launch.run_id,
+        seed=seed,
+        role="llm_disabled",
+        comparison_path=comparison_path,
+    )
+
+    _launch_comparison_monitor(
+        comparison_id,
+        llm_launch.run_id,
+        baseline_launch.run_id,
+        comparison_path,
+        runs_root=_resolve_runs_root(runs_root),
+        seed=seed,
+    )
+
+    return LlmComparisonLaunch(
+        comparison_id=comparison_id,
+        seed=seed,
+        llm_enabled=llm_launch,
+        llm_disabled=baseline_launch,
+        summary_path=comparison_path,
     )
 
 
@@ -243,6 +350,9 @@ def _apply_overrides(
             updated = dict(llm_critic)
             updated["enabled"] = False
             data["llm_critic"] = updated
+
+    if overrides.seed is not None:
+        data["seed"] = overrides.seed
 
     return OptimizationConfig.model_validate(data)
 
@@ -426,12 +536,270 @@ def _json_ready(value: Any) -> Any:
         return str(value)
 
 
+def _llm_available(model: OptimizationConfig) -> bool:
+    if model.llm is not None:
+        return True
+    if model.llm_guidance is not None and model.llm_guidance.enabled:
+        return True
+    if model.llm_critic is not None and model.llm_critic.enabled:
+        return True
+    if (
+        model.planner is not None
+        and model.planner.enabled
+        and getattr(model.planner, "backend", "rule") == "llm"
+    ):
+        return True
+    return False
+
+
+def _select_shared_seed(
+    model: OptimizationConfig,
+    options: RunOptions,
+    *,
+    requested_run_id: str | None,
+) -> int | None:
+    if options.seed is not None:
+        return options.seed
+    if model.seed is not None:
+        return model.seed
+    base = requested_run_id or model.metadata.name or "run"
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()
+    # keep value in 32bit-ish range for reproducibility across libs
+    return int(digest[:8], 16)
+
+
+def _derive_baseline_run_id(base_run_id: str, runs_root: Path) -> str:
+    suffix = "no-llm"
+    candidate = f"{base_run_id}-{suffix}"
+    counter = 2
+    while (runs_root / candidate).exists():
+        candidate = f"{base_run_id}-{suffix}-{counter:02d}"
+        counter += 1
+    return candidate
+
+
+def _init_comparison_record(
+    comparison_id: str,
+    llm_launch: RunLaunch,
+    baseline_launch: RunLaunch,
+    config_path: Path,
+    *,
+    seed: int | None,
+    runs_root: Path,
+) -> Path:
+    record = {
+        "id": comparison_id,
+        "type": "llm_vs_no_llm",
+        "config_path": str(config_path),
+        "shared_seed": seed,
+        "runs": {
+            "llm_enabled": llm_launch.run_id,
+            "llm_disabled": baseline_launch.run_id,
+        },
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    compare_dir = runs_root / "comparisons"
+    compare_dir.mkdir(parents=True, exist_ok=True)
+    comparison_path = compare_dir / f"{comparison_id}.json"
+    comparison_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    return comparison_path
+
+
+def _annotate_run_comparison(
+    meta_path: Path,
+    *,
+    comparison_id: str,
+    paired_run_id: str,
+    seed: int | None,
+    role: str,
+    comparison_path: Path,
+) -> None:
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    comparison_data = data.get("comparison")
+    if isinstance(comparison_data, Mapping):
+        merged = dict(comparison_data)
+    else:
+        merged = {}
+
+    merged.update(
+        {
+            "group": comparison_id,
+            "paired_run_id": paired_run_id,
+            "role": role,
+            "shared_seed": seed,
+            "record_path": str(comparison_path),
+        }
+    )
+    data["comparison"] = merged
+
+    artifacts = data.get("artifacts")
+    artifacts_map = dict(artifacts) if isinstance(artifacts, Mapping) else {}
+    artifacts_map.setdefault("llm_comparison", str(comparison_path))
+    data["artifacts"] = artifacts_map
+
+    meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _launch_comparison_monitor(
+    comparison_id: str,
+    llm_run_id: str,
+    baseline_run_id: str,
+    comparison_path: Path,
+    *,
+    runs_root: Path,
+    seed: int | None,
+) -> None:
+    watcher = threading.Thread(
+        target=_monitor_comparison_group,
+        args=(comparison_id, llm_run_id, baseline_run_id, comparison_path, runs_root, seed),
+        name=f"llm-compare-{comparison_id}",
+        daemon=True,
+    )
+    watcher.start()
+
+
+def _monitor_comparison_group(
+    comparison_id: str,
+    llm_run_id: str,
+    baseline_run_id: str,
+    comparison_path: Path,
+    runs_root: Path,
+    seed: int | None,
+) -> None:
+    while True:
+        try:
+            llm_meta = tracking_load_run(llm_run_id, runs_root=runs_root)
+            baseline_meta = tracking_load_run(baseline_run_id, runs_root=runs_root)
+        except FileNotFoundError:
+            time.sleep(0.5)
+            continue
+
+        if _is_active_status(llm_meta.status) or _is_active_status(baseline_meta.status):
+            time.sleep(1.0)
+            continue
+
+        summary = _build_comparison_summary(llm_meta, baseline_meta, seed)
+        record = _load_comparison_record(comparison_path)
+        record.update(
+            {
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "summary": summary,
+            }
+        )
+        comparison_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+        _annotate_run_comparison(
+            llm_meta.meta_path,
+            comparison_id=comparison_id,
+            paired_run_id=baseline_run_id,
+            seed=seed,
+            role="llm_enabled",
+            comparison_path=comparison_path,
+        )
+        _annotate_run_comparison(
+            baseline_meta.meta_path,
+            comparison_id=comparison_id,
+            paired_run_id=llm_run_id,
+            seed=seed,
+            role="llm_disabled",
+            comparison_path=comparison_path,
+        )
+        break
+
+
+def _is_active_status(status: str | None) -> bool:
+    if status is None:
+        return True
+    lowered = status.lower()
+    return lowered in {"running", "cancelling", "created"}
+
+
+def _load_comparison_record(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _build_comparison_summary(
+    llm_meta: RunMetadata,
+    baseline_meta: RunMetadata,
+    seed: int | None,
+) -> dict[str, Any]:
+    llm_payload = _extract_outcome(llm_meta)
+    baseline_payload = _extract_outcome(baseline_meta)
+    deltas = _compute_metric_deltas(llm_payload, baseline_payload)
+    return {
+        "shared_seed": seed,
+        "llm_enabled": llm_payload,
+        "llm_disabled": baseline_payload,
+        "deltas": deltas,
+    }
+
+
+def _extract_outcome(metadata: RunMetadata) -> dict[str, Any]:
+    payload = metadata.status_payload if isinstance(metadata.status_payload, Mapping) else {}
+    artifacts = metadata.artifact_paths
+    return {
+        "run_id": metadata.run_id,
+        "status": metadata.status,
+        "best_value": payload.get("best_value"),
+        "best_metrics": payload.get("best_metrics"),
+        "trials_completed": payload.get("trials_completed"),
+        "total_cost": payload.get("total_cost"),
+        "note": payload.get("note"),
+        "log_path": str(artifacts.get("log")) if "log" in artifacts else None,
+        "report_path": str(artifacts.get("report")) if "report" in artifacts else None,
+    }
+
+
+def _compute_metric_deltas(
+    llm_payload: Mapping[str, Any],
+    baseline_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    llm_metrics = (
+        dict(llm_payload.get("best_metrics")) if isinstance(llm_payload.get("best_metrics"), Mapping) else {}
+    )
+    baseline_metrics = (
+        dict(baseline_payload.get("best_metrics"))
+        if isinstance(baseline_payload.get("best_metrics"), Mapping)
+        else {}
+    )
+    deltas: dict[str, Any] = {}
+    for name in set(llm_metrics).intersection(baseline_metrics):
+        lhs = _safe_float(llm_metrics.get(name))
+        rhs = _safe_float(baseline_metrics.get(name))
+        if lhs is None or rhs is None:
+            continue
+        deltas[name] = lhs - rhs
+
+    llm_best = _safe_float(llm_payload.get("best_value"))
+    baseline_best = _safe_float(baseline_payload.get("best_value"))
+    if llm_best is not None and baseline_best is not None:
+        deltas["best_value"] = llm_best - baseline_best
+    return deltas
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 __all__ = [
     "RunOptions",
     "DryRunResult",
     "RunLaunch",
+    "LlmComparisonLaunch",
     "dry_run_config",
     "start_run",
+    "start_llm_comparison",
     "list_runs",
     "load_run_detail",
     "request_cancel",

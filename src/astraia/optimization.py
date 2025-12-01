@@ -1176,7 +1176,29 @@ def _build_nsga_sampler(
 
 def sample_params(trial: optuna.trial.Trial, space: Mapping[str, Any]) -> Dict[str, Any]:
     params: Dict[str, Any] = {}
+    # Layered QAOA angles: sample n_layers first so deeper gamma/beta are conditional.
+    n_layers_value = None
+    n_layers_spec = space.get("n_layers")
+    if isinstance(n_layers_spec, Mapping) and n_layers_spec.get("type") == "int":
+        step = n_layers_spec.get("step")
+        int_step = int(step) if step is not None else 1
+        params["n_layers"] = trial.suggest_int(
+            "n_layers",
+            int(n_layers_spec["low"]),
+            int(n_layers_spec["high"]),
+            step=int_step,
+        )
+        n_layers_value = params["n_layers"]
+
     for name, spec in space.items():
+        if name == "n_layers":
+            continue
+
+        layer_index = _layer_index(name)
+        if n_layers_value is not None and layer_index is not None and layer_index >= n_layers_value:
+            params[name] = 0.0  # keep CSV aligned but avoid exploring unused angles
+            continue
+
         param_type = spec.get("type")
         if param_type == "float":
             step = spec.get("step")
@@ -1203,6 +1225,19 @@ def sample_params(trial: optuna.trial.Trial, space: Mapping[str, Any]) -> Dict[s
         else:
             raise ValueError(f"Unsupported parameter type for '{name}': {param_type}")
     return params
+
+
+def _layer_index(name: str) -> int | None:
+    """Extract gamma/beta layer index from names like gamma_2 or beta_3."""
+    if "_" not in name:
+        return None
+    prefix, _, suffix = name.partition("_")
+    if prefix not in {"gamma", "beta"}:
+        return None
+    try:
+        return int(suffix)
+    except ValueError:
+        return None
 
 
 def _suggest_llm_only(trial: optuna.trial.Trial, name: str, spec: Mapping[str, Any]) -> Any:

@@ -1,6 +1,6 @@
 metadata:
   name: qaoa_small
-  description: "QAOA for a 4-qubit MaxCut ring"
+  description: "QAOA for a 4-qubit MaxCut ring with noise-aware metrics"
 
 seed: 11
 
@@ -9,9 +9,12 @@ search:
   sampler: nsga2
   n_trials: 36
   multi_objective: true
-  metrics: [energy, depth]
-  directions: [minimize, minimize]
-  study_name: qaoa_small
+  metrics:
+    - name: energy
+      direction: minimize
+    - name: depth
+      direction: minimize
+  study_name: qaoa_llm_guided
 
 stopping:
   max_trials: 36
@@ -19,11 +22,15 @@ stopping:
 
 planner:
   enabled: false
+  backend: rule
 
 llm_guidance:
   enabled: false
 
 meta_search:
+  enabled: false
+
+llm_critic:
   enabled: false
 
 search_space:
@@ -64,7 +71,6 @@ search_space:
     low: 0.0
     high: 3.1416
 
-
 evaluator:
   module: astraia.evaluators.qaoa
   callable: create_qaoa_evaluator
@@ -75,8 +81,8 @@ evaluator:
     - [2, 3]
     - [3, 0]
   noise_simulation:
-    enabled: false        # false にするとノイズシミュレーションをスキップ
-    label: nisq_mock     # ログ上で識別しやすい任意ラベル
+    enabled: true
+    label: nisq_mock
     single_qubit_depolarizing: 0.001
     two_qubit_depolarizing: 0.01
     readout_error: 0.02
@@ -86,8 +92,10 @@ report:
   filename: qaoa_small.md
   metrics:
     - energy
+    - energy_noisy
     - energy_delta
     - fidelity
+    - fidelity_noisy
     - fidelity_delta
     - depth
     - gate_count
@@ -96,3 +104,4 @@ report:
 artifacts:
   run_root: runs/qaoa_small
   log_file: runs/qaoa_small/log.csv
+  

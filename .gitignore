@@ -4,3 +4,5 @@ __pycache__/
 .venv
 runs/
 reports/
+frontend/node_modules/
+frontend/dist/

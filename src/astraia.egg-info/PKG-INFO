@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: astraia
 Version: 0.1.0
-Summary: LLM-driven optimization framework (MVP skeleton).
+Summary: LLM-driven optimization framework.
 Author: Astraia Dev Team
 License: MIT
 Requires-Python: >=3.11
@@ -15,6 +15,7 @@ Requires-Dist: httpx>=0.27
 Requires-Dist: matplotlib>=3.8
 Requires-Dist: pandas>=2.2
 Requires-Dist: qiskit>=1.0
+Requires-Dist: qiskit-aer>=0.14
 Requires-Dist: hypothesis>=6.100
 Requires-Dist: qiskit-qasm3-import>=0.5
 Provides-Extra: openai
@@ -26,6 +27,7 @@ Requires-Dist: openai>=1.0; extra == "llm"
 Requires-Dist: google-generativeai>=0.5; extra == "llm"
 Provides-Extra: quantum
 Requires-Dist: qiskit>=1.0; extra == "quantum"
+Requires-Dist: qiskit-aer>=0.14; extra == "quantum"
 Requires-Dist: qiskit-qasm3-import>=0.5; extra == "quantum"
 
 # Astraia MVP
@@ -52,6 +54,7 @@ Requires-Dist: qiskit-qasm3-import>=0.5; extra == "quantum"
    pip install -e .[openai]   # OpenAI 連携
    pip install -e .[gemini]   # Gemini 連携
    pip install -e .[llm]      # 両方まとめて
+   pip install -e .[quantum]  # Qiskit + Aer（ノイズシミュレーションを含む量子実験）
    ```
 
 4. LLM API キーを `.env` に追記します（例: `OPENAI_API_KEY=sk-...`）。テンプレートは `.env.example` をコピーしてください。
@@ -127,6 +130,8 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 ```bash
 pip install -e .[quantum]
 ```
+
+`[quantum]` extra には `qiskit-aer` も含まれるため、`noise_simulation` ブロックを有効化した場合でも追加インストールなしで Aer ベースのノイズシミュレーションが動作します。
 
 ### 代表的な設定ファイル
 

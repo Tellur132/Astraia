@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, List, Mapping
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .config_service import (
@@ -16,12 +18,15 @@ from .config_service import (
 )
 from .env_status import env_status
 from .run_service import (
+    LlmComparisonLaunch,
+    RunLaunch,
     RunOptions,
     active_job_info,
     dry_run_config,
     list_runs as service_list_runs,
     load_run_detail,
     request_cancel,
+    start_llm_comparison,
     start_run,
 )
 from astraia.config import ValidationError
@@ -69,6 +74,7 @@ class RunOptionsPayload(BaseModel):
     max_trials: int | None = Field(default=None, ge=1)
     sampler: str | None = None
     llm_enabled: bool | None = None
+    seed: int | None = Field(default=None, ge=0)
 
 
 class DryRunRequest(BaseModel):
@@ -90,6 +96,22 @@ class RunStartRequest(BaseModel):
     options: RunOptionsPayload | None = None
     perform_dry_run: bool = True
     ping_llm: bool = True
+    llm_comparison: bool = False
+
+
+class RunHandle(BaseModel):
+    run_id: str
+    status: str
+    run_dir: str
+    meta_path: str
+
+
+class RunComparisonInfo(BaseModel):
+    comparison_id: str
+    shared_seed: int | None = None
+    record_path: str | None = None
+    llm_enabled: RunHandle
+    llm_disabled: RunHandle
 
 
 class RunStartResponse(BaseModel):
@@ -97,6 +119,7 @@ class RunStartResponse(BaseModel):
     status: str
     run_dir: str
     meta_path: str
+    comparison: RunComparisonInfo | None = None
 
 
 class RunListItem(BaseModel):
@@ -130,6 +153,13 @@ class CancelResponse(BaseModel):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Astraia GUI Backend", version="0.1.0")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -248,6 +278,22 @@ def create_app() -> FastAPI:
     def post_runs(payload: RunStartRequest) -> RunStartResponse:
         try:
             options = _options_from_payload(payload.options)
+            if payload.llm_comparison:
+                comparison_launch = start_llm_comparison(
+                    payload.config_path,
+                    run_id=payload.run_id,
+                    options=options,
+                    perform_dry_run=payload.perform_dry_run,
+                    ping_llm=payload.ping_llm,
+                )
+                return RunStartResponse(
+                    run_id=comparison_launch.llm_enabled.run_id,
+                    status=comparison_launch.llm_enabled.status,
+                    run_dir=str(comparison_launch.llm_enabled.run_dir),
+                    meta_path=str(comparison_launch.llm_enabled.meta_path),
+                    comparison=_serialize_comparison_launch(comparison_launch),
+                )
+
             launch = start_run(
                 payload.config_path,
                 run_id=payload.run_id,
@@ -335,7 +381,17 @@ def _options_from_payload(payload: RunOptionsPayload | None) -> RunOptions | Non
         max_trials=payload.max_trials,
         sampler=payload.sampler,
         llm_enabled=payload.llm_enabled,
+        seed=payload.seed,
     )
+
+def _cors_origins() -> list[str]:
+    env_value = os.environ.get("ASTRAIA_GUI_CORS_ORIGINS")
+    if env_value:
+        return [item.strip() for item in env_value.split(",") if item.strip()]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
 
 def _serialize_run_metadata(metadata: RunMetadata) -> RunListItem:
@@ -354,4 +410,23 @@ def _serialize_run_metadata(metadata: RunMetadata) -> RunListItem:
         artifacts=artifacts,
         status_payload=status_payload,
         run_dir=str(metadata.run_dir),
+    )
+
+
+def _serialize_run_launch(launch: RunLaunch) -> RunHandle:
+    return RunHandle(
+        run_id=launch.run_id,
+        status=launch.status,
+        run_dir=str(launch.run_dir),
+        meta_path=str(launch.meta_path),
+    )
+
+
+def _serialize_comparison_launch(launch: LlmComparisonLaunch) -> RunComparisonInfo:
+    return RunComparisonInfo(
+        comparison_id=launch.comparison_id,
+        shared_seed=launch.seed,
+        record_path=str(launch.summary_path) if launch.summary_path else None,
+        llm_enabled=_serialize_run_launch(launch.llm_enabled),
+        llm_disabled=_serialize_run_launch(launch.llm_disabled),
     )

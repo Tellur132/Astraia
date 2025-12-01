@@ -27,8 +27,10 @@ class NISQNoiseConfig:
         return cls(
             label=str(config.get("label", "nisq")),
             enabled=bool(config.get("enabled", True)),
-            single_qubit_depolarizing=float(config.get("single_qubit_depolarizing", 0.0)),
-            two_qubit_depolarizing=float(config.get("two_qubit_depolarizing", 0.0)),
+            single_qubit_depolarizing=float(
+                config.get("single_qubit_depolarizing", 0.0)),
+            two_qubit_depolarizing=float(
+                config.get("two_qubit_depolarizing", 0.0)),
             readout_error=float(config.get("readout_error", 0.0)),
             method=str(config.get("method", "density_matrix")),
             seed_simulator=(
@@ -57,7 +59,8 @@ def _build_noise_model(config: NISQNoiseConfig):
     try:
         from qiskit_aer.noise import NoiseModel, ReadoutError, depolarizing_error
     except Exception as exc:  # noqa: BLE001 - surfacing missing dependency
-        raise RuntimeError("qiskit-aer is required for noise simulation") from exc
+        raise RuntimeError(
+            "qiskit-aer is required for noise simulation") from exc
 
     cfg = config.clamped()
     model = NoiseModel()
@@ -93,14 +96,26 @@ def simulate_noisy_density_matrix(
     try:
         from qiskit_aer import AerSimulator
     except Exception as exc:  # noqa: BLE001 - surfacing missing dependency
-        raise RuntimeError("qiskit-aer is required for noise simulation") from exc
+        raise RuntimeError(
+            "qiskit-aer is required for noise simulation") from exc
 
     simulator = AerSimulator(
         method=config.method or "density_matrix",
         noise_model=_build_noise_model(config),
     )
 
-    compiled = transpile(circuit, simulator, optimization_level=0)
+    # --- 追加: 状態保存命令を入れる（ここを変更） ---
+    work = circuit.copy()
+    method = (config.method or "density_matrix").lower()
+
+    if method in {"density_matrix", "superop", "kraus"}:
+        work.save_density_matrix()  # type: ignore[attr-defined]
+    else:
+        # ノイズを厳密に扱うなら density_matrix 推奨
+        work.save_statevector()  # type: ignore[attr-defined]
+    # --- 追加ここまで ---
+
+    compiled = transpile(work, simulator, optimization_level=0)
     sim_seed = seed if seed is not None else config.seed_simulator
     result = simulator.run(compiled, seed_simulator=sim_seed).result()
     data = result.data(0)
@@ -112,7 +127,8 @@ def simulate_noisy_density_matrix(
         or data.get("final_statevector")
     )
     if density_like is None:
-        raise RuntimeError("Simulator did not return a statevector or density matrix")
+        raise RuntimeError(
+            "Simulator did not return a statevector or density matrix")
 
     try:
         return DensityMatrix(density_like)

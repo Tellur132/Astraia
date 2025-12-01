@@ -22,6 +22,7 @@
    pip install -e .[openai]   # OpenAI 連携
    pip install -e .[gemini]   # Gemini 連携
    pip install -e .[llm]      # 両方まとめて
+   pip install -e .[quantum]  # Qiskit + Aer（ノイズシミュレーションを含む量子実験）
    ```
 
 4. LLM API キーを `.env` に追記します（例: `OPENAI_API_KEY=sk-...`）。テンプレートは `.env.example` をコピーしてください。
@@ -97,6 +98,8 @@ LLM を一切使わずに多目的探索を試したい場合は `configs/multio
 ```bash
 pip install -e .[quantum]
 ```
+
+`[quantum]` extra には `qiskit-aer` も含まれるため、`noise_simulation` ブロックを有効化した場合でも追加インストールなしで Aer ベースのノイズシミュレーションが動作します。
 
 ### 代表的な設定ファイル
 

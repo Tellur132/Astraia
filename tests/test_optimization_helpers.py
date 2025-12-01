@@ -50,6 +50,26 @@ class OptimizationHelperTests(unittest.TestCase):
 
         self.assertEqual(params["code"], "from LLM")
 
+    def test_qaoa_layers_gate_unused_angles(self) -> None:
+        search_space = {
+            "n_layers": {"type": "int", "low": 1, "high": 3},
+            "gamma_0": {"type": "float", "low": 0.0, "high": 1.0},
+            "beta_0": {"type": "float", "low": 0.0, "high": 1.0},
+            "gamma_1": {"type": "float", "low": 0.0, "high": 1.0},
+            "beta_1": {"type": "float", "low": 0.0, "high": 1.0},
+        }
+        study = optuna.create_study()
+        study.enqueue_trial({"n_layers": 1})
+        trial = study.ask()
+
+        params = optimization.sample_params(trial, search_space)
+
+        self.assertEqual(params["n_layers"], 1)
+        self.assertIn("gamma_0", params)
+        self.assertIn("beta_0", params)
+        self.assertEqual(params["gamma_1"], 0.0)
+        self.assertEqual(params["beta_1"], 0.0)
+
 
 class TrialLoggerTests(unittest.TestCase):
     def test_logger_handles_prefixed_and_unprefixed_metrics(self) -> None:

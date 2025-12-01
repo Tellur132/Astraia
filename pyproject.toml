@@ -1,7 +1,7 @@
 [project]
 name = "astraia"
 version = "0.1.0"
-description = "LLM-driven optimization framework (MVP skeleton)."
+description = "LLM-driven optimization framework."
 requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
   "matplotlib>=3.8",
   "pandas>=2.2",
   "qiskit>=1.0",
+  "qiskit-aer>=0.14",
   "hypothesis>=6.100",
   "qiskit-qasm3-import>=0.5",
 ]
@@ -26,7 +27,7 @@ license = { text = "MIT" }
 openai = ["openai>=1.0"]
 gemini = ["google-generativeai>=0.5"]
 llm = ["openai>=1.0", "google-generativeai>=0.5"]
-quantum = ["qiskit>=1.0", "qiskit-qasm3-import>=0.5"]
+quantum = ["qiskit>=1.0", "qiskit-aer>=0.14", "qiskit-qasm3-import>=0.5"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
