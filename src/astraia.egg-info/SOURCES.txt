@@ -26,6 +26,7 @@ src/astraia/evaluators/__init__.py
 src/astraia/evaluators/base.py
 src/astraia/evaluators/branin.py
 src/astraia/evaluators/circuit_fidelity.py
+src/astraia/evaluators/exact_solvers.py
 src/astraia/evaluators/llm_template.py
 src/astraia/evaluators/noise_simulation.py
 src/astraia/evaluators/qaoa.py
@@ -60,6 +61,7 @@ tests/test_optimization_helpers.py
 tests/test_pareto_report.py
 tests/test_pareto_summary.py
 tests/test_planner.py
+tests/test_qaoa_evaluator.py
 tests/test_qgan_evaluator.py
 tests/test_run_management.py
 tests/test_run_summary.py

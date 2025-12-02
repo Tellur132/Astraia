@@ -53,7 +53,7 @@ meta_search:
   enabled: false
 
 llm_critic:
-  enabled: true
+  enabled: false
   max_history: 120
   prompt_preamble: "Review the QAOA MaxCut run and suggest next-step angle tweaks if convergence stalls."
 
