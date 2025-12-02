@@ -8,55 +8,11 @@ from typing import Any, Iterable, Mapping, Sequence, Tuple
 
 import numpy as np
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import SparsePauliOp, Statevector, state_fidelity
+from qiskit.quantum_info import DensityMatrix, Statevector, state_fidelity
 
 from .base import EvaluatorResult
+from .exact_solvers import Edge, build_maxcut_operator, solve_cost_hamiltonian_ground_state
 from .noise_simulation import NISQNoiseConfig, simulate_noisy_density_matrix
-
-Edge = Tuple[int, int]
-
-
-def _build_maxcut_operator(num_qubits: int, edges: Sequence[Edge]) -> SparsePauliOp:
-    terms: list[SparsePauliOp] = []
-    for i, j in edges:
-        z_term = ["I"] * num_qubits
-        z_term[i] = "Z"
-        z_term[j] = "Z"
-        pauli = "".join(reversed(z_term))
-        terms.append(SparsePauliOp(pauli, coeffs=[0.5]))
-        terms.append(SparsePauliOp("I" * num_qubits, coeffs=[-0.5]))
-    if not terms:
-        return SparsePauliOp("I" * num_qubits, coeffs=[0.0])
-    operator = terms[0]
-    for term in terms[1:]:
-        operator += term
-    return operator
-
-
-def _maxcut_best_state(num_qubits: int, edges: Sequence[Edge]) -> Statevector:
-    if num_qubits == 0:
-        return Statevector(np.array([1.0]))
-
-    best_score = -math.inf
-    best_strings: list[int] = []
-    for bitstring in range(1 << num_qubits):
-        score = 0
-        for i, j in edges:
-            bit_i = (bitstring >> i) & 1
-            bit_j = (bitstring >> j) & 1
-            if bit_i != bit_j:
-                score += 1
-        if score > best_score:
-            best_score = score
-            best_strings = [bitstring]
-        elif score == best_score:
-            best_strings.append(bitstring)
-
-    amplitudes = np.zeros(1 << num_qubits, dtype=complex)
-    weight = 1 / math.sqrt(max(len(best_strings), 1))
-    for bitstring in best_strings:
-        amplitudes[bitstring] = weight
-    return Statevector(amplitudes)
 
 
 def _extract_angles(params: Mapping[str, Any], n_layers: int) -> Iterable[Tuple[float, float]]:
@@ -64,6 +20,30 @@ def _extract_angles(params: Mapping[str, Any], n_layers: int) -> Iterable[Tuple[
         gamma = float(params.get(f"gamma_{layer}", params.get("gamma", 0.0)))
         beta = float(params.get(f"beta_{layer}", params.get("beta", 0.0)))
         yield gamma, beta
+
+
+def _success_probability(state: Statevector | DensityMatrix, bitstrings: Sequence[str]) -> float:
+    """Probability of measuring any optimal bitstring."""
+    if isinstance(state, Statevector):
+        return float(
+            sum(abs(state.data[int(bits or "0", 2)]) ** 2 for bits in bitstrings)
+        )
+    if isinstance(state, DensityMatrix):
+        return float(
+            sum(np.real(state.data[int(bits or "0", 2), int(bits or "0", 2)]) for bits in bitstrings)
+        )
+    raise TypeError(f"Unsupported state type for success probability: {type(state)!r}")
+
+
+def _bitstrings_to_statevector(bitstrings: Sequence[str], num_qubits: int) -> Statevector:
+    """Uniform superposition over provided bitstrings."""
+    dimension = 1 << num_qubits
+    amplitudes = np.zeros(dimension, dtype=complex)
+    weight = 1 / math.sqrt(max(len(bitstrings), 1))
+    for value in bitstrings:
+        index = int(value, 2) if value else 0
+        amplitudes[index] = weight
+    return Statevector(amplitudes)
 
 
 @dataclass(slots=True)
@@ -89,10 +69,16 @@ class QAOAEvaluator:
 
         state = Statevector.from_instruction(circuit)
 
-        cost_operator = _build_maxcut_operator(self.num_qubits, self.edges)
+        cost_operator = build_maxcut_operator(self.num_qubits, self.edges)
+        exact_energy, optimal_bitstrings = solve_cost_hamiltonian_ground_state(
+            cost_operator, num_qubits=self.num_qubits
+        )
+        target = _bitstrings_to_statevector(optimal_bitstrings, self.num_qubits)
+        # Lower energy (more negative) corresponds to larger cuts with this H_C.
         energy = float(np.real(state.expectation_value(cost_operator)))
+        energy_gap = energy - exact_energy
+        success_prob = _success_probability(state, optimal_bitstrings)
 
-        target = _maxcut_best_state(self.num_qubits, self.edges)
         fidelity = float(state_fidelity(state, target))
 
         depth = float(circuit.depth() or 0)
@@ -105,12 +91,15 @@ class QAOAEvaluator:
                     circuit, self.noise_simulation, seed=seed
                 )
                 noisy_energy = float(np.real(noisy_state.expectation_value(cost_operator)))
+                noisy_success = _success_probability(noisy_state, optimal_bitstrings)
                 noisy_fidelity = float(state_fidelity(noisy_state, target))
                 noise_metrics = {
                     "metric_energy_noisy": noisy_energy,
                     "metric_fidelity_noisy": noisy_fidelity,
                     "metric_energy_delta": noisy_energy - energy,
                     "metric_fidelity_delta": fidelity - noisy_fidelity,
+                    "metric_success_prob_opt_noisy": noisy_success,
+                    "metric_success_prob_opt_delta": noisy_success - success_prob,
                     "noise_model_label": self.noise_simulation.label,
                     "noise_status": "ok",
                 }
@@ -125,6 +114,9 @@ class QAOAEvaluator:
         return {
             "metric_fidelity": fidelity,
             "metric_energy": energy,
+            "metric_energy_exact": exact_energy,
+            "metric_energy_gap": energy_gap,
+            "metric_success_prob_opt": success_prob,
             "metric_depth": depth,
             "metric_gate_count": gate_count,
             "n_layers": float(n_layers),
