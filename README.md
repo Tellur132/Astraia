@@ -1,5 +1,7 @@
 # Astraia MVP
 
+[詳細なドキュメントはこちら](https://tellur132.github.io/Astraia/)
+
 Astraia は YAML 設定から Optuna ベースの探索ループを自動生成し、CSV / Markdown / PNG / LLM ログなどの成果物を残す LLM 駆動最適化フレームワークです。CLI は安定化済み、GUI バックエンドは実験的に提供しています。
 
 ## 特徴（概要）
