@@ -458,7 +458,7 @@ def ping_llm_provider(llm_cfg: Mapping[str, Any] | None) -> None:
         return
 
     try:
-        provider, _ = create_llm_provider(llm_cfg, strict=True)
+        provider, _, _ = create_llm_provider(llm_cfg, strict=True)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     except ProviderUnavailableError as exc:

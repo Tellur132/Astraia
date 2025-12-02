@@ -27,6 +27,7 @@ class RunArtifacts:
     report_path: Path
     meta_path: Path
     llm_usage_path: Path | None = None
+    llm_trace_path: Path | None = None
 
 
 def prepare_run_environment(
@@ -68,6 +69,7 @@ def prepare_run_environment(
     llm_cfg = config_dict.get("llm")
     if isinstance(llm_cfg, MutableMapping):
         llm_cfg["usage_log"] = str(run_dir / "llm_usage.csv")
+        llm_cfg["trace_log"] = str(run_dir / "llm_messages.jsonl")
 
     # Revalidate to capture any automatic adjustments from the schema
     final_model = OptimizationConfig.model_validate(config_dict)
@@ -81,11 +83,15 @@ def prepare_run_environment(
     report_path = Path(report_section.get("output_dir", run_dir)) / report_filename
 
     llm_usage_path = None
+    llm_trace_path = None
     final_llm_cfg = final_config.get("llm")
     if isinstance(final_llm_cfg, MutableMapping):
         usage_value = final_llm_cfg.get("usage_log")
         if usage_value:
             llm_usage_path = Path(usage_value)
+        trace_value = final_llm_cfg.get("trace_log")
+        if trace_value:
+            llm_trace_path = Path(trace_value)
 
     artifacts = _write_run_metadata(
         final_model,
@@ -94,6 +100,7 @@ def prepare_run_environment(
         log_path=log_path,
         report_path=report_path,
         llm_usage_path=llm_usage_path,
+        llm_trace_path=llm_trace_path,
     )
 
     return final_config, artifacts
@@ -140,6 +147,7 @@ def _write_run_metadata(
     log_path: Path,
     report_path: Path,
     llm_usage_path: Path | None,
+    llm_trace_path: Path | None,
 ) -> RunArtifacts:
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,6 +155,9 @@ def _write_run_metadata(
     if llm_usage_path is not None:
         llm_usage_path.parent.mkdir(parents=True, exist_ok=True)
         llm_usage_path.touch(exist_ok=True)
+    if llm_trace_path is not None:
+        llm_trace_path.parent.mkdir(parents=True, exist_ok=True)
+        llm_trace_path.touch(exist_ok=True)
 
     original_path = run_dir / "config_original.yaml"
     if config_source and config_source.exists():
@@ -191,6 +202,8 @@ def _write_run_metadata(
 
     if llm_usage_path is not None:
         meta["artifacts"]["llm_usage"] = str(llm_usage_path)
+    if llm_trace_path is not None:
+        meta["artifacts"]["llm_trace"] = str(llm_trace_path)
 
     meta_path = run_dir / "meta.json"
     with meta_path.open("w", encoding="utf-8") as fh:
@@ -205,6 +218,7 @@ def _write_run_metadata(
         report_path=report_path,
         meta_path=meta_path,
         llm_usage_path=llm_usage_path,
+        llm_trace_path=llm_trace_path,
     )
 
 

@@ -8,7 +8,14 @@ from typing import Any, Dict, Mapping, MutableMapping
 
 from .llm_guidance import create_llm_provider
 from .llm_interfaces import LLMRunContext
-from .llm_providers import LLMResult, LLMUsageLogger, Prompt, PromptMessage, ToolDefinition
+from .llm_providers import (
+    LLMExchangeLogger,
+    LLMResult,
+    LLMUsageLogger,
+    Prompt,
+    PromptMessage,
+    ToolDefinition,
+)
 
 
 @dataclass
@@ -95,6 +102,7 @@ class LLMPlanner(BasePlanner):
         prompt_template: str,
         provider: Any,
         usage_logger: LLMUsageLogger | None,
+        trace_logger: LLMExchangeLogger | None,
         fallback: RuleBasedPlanner,
         extra_directives: str | None = None,
     ) -> None:
@@ -102,6 +110,7 @@ class LLMPlanner(BasePlanner):
         self._prompt_template = prompt_template
         self._provider = provider
         self._usage_logger = usage_logger
+        self._trace_logger = trace_logger
         self._fallback = fallback
         self._extra_directives = extra_directives
         self._tool_schema: ToolDefinition | None = None
@@ -112,6 +121,9 @@ class LLMPlanner(BasePlanner):
 
         prompt = self._build_prompt(context)
         tool = self._strategy_tool()
+        params = {"temperature": 0.2, "json_mode": False}
+        result: LLMResult | None = None
+        error: str | None = None
         try:
             result = self._provider.generate(
                 prompt,
@@ -119,10 +131,37 @@ class LLMPlanner(BasePlanner):
                 system=self._SYSTEM_PROMPT,
                 tool=tool,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
+            self._log_exchange(
+                prompt=prompt,
+                system=self._SYSTEM_PROMPT,
+                tool=tool,
+                params=params,
+                result=None,
+                error=error,
+            )
             return self._fallback.generate_strategy(context)
+        except Exception as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
+            self._log_exchange(
+                prompt=prompt,
+                system=self._SYSTEM_PROMPT,
+                tool=tool,
+                params=params,
+                result=None,
+                error=error,
+            )
+            raise
 
         self._log_usage(result)
+        self._log_exchange(
+            prompt=prompt,
+            system=self._SYSTEM_PROMPT,
+            tool=tool,
+            params=params,
+            result=result,
+        )
         strategy = self._parse_result(result)
         if strategy is None:
             return self._fallback.generate_strategy(context)
@@ -131,6 +170,27 @@ class LLMPlanner(BasePlanner):
     def _log_usage(self, result: LLMResult) -> None:
         if self._usage_logger is not None:
             self._usage_logger.log(result.usage)
+
+    def _log_exchange(
+        self,
+        *,
+        prompt: Prompt,
+        system: str | None,
+        tool: ToolDefinition | None,
+        params: Mapping[str, Any],
+        result: LLMResult | None,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_logger is None:
+            return
+        self._trace_logger.log(
+            prompt=prompt,
+            system=system,
+            tool=tool,
+            params=params,
+            result=result,
+            error=error,
+        )
 
     def _build_prompt(self, context: LLMRunContext) -> Prompt:
         lines = [self._prompt_template.strip(), ""]
@@ -248,7 +308,7 @@ def create_planner_agent(
     extra_directives = _load_optional_text(planner_cfg.get("config_path"))
     role_llm_cfg = role_entry.get("llm") if role_entry else None
     effective_llm_cfg = role_llm_cfg or llm_cfg
-    provider, usage_logger = create_llm_provider(effective_llm_cfg)
+    provider, usage_logger, trace_logger = create_llm_provider(effective_llm_cfg)
     if provider is None:
         return fallback
 
@@ -258,6 +318,7 @@ def create_planner_agent(
         prompt_template=template_text,
         provider=provider,
         usage_logger=usage_logger,
+        trace_logger=trace_logger,
         fallback=fallback,
         extra_directives=extra_directives,
     )
@@ -290,4 +351,3 @@ def _load_optional_text(path_value: str | None) -> str | None:
 
 
 __all__ = ["PlannerStrategy", "create_planner_agent"]
-

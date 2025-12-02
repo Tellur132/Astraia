@@ -4,8 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Sequence
+from typing import Any, List, Mapping, Sequence
 import csv
+import json
 
 __all__ = [
     "PromptMessage",
@@ -15,6 +16,7 @@ __all__ = [
     "ToolDefinition",
     "ProviderUnavailableError",
     "LLMUsageLogger",
+    "LLMExchangeLogger",
     "OpenAIProvider",
     "GeminiProvider",
 ]
@@ -143,6 +145,96 @@ def ensure_usage_log(path: Path | str) -> None:
     """Create the parent directory for a usage log path."""
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+class LLMExchangeLogger:
+    """Append-only JSONL logger capturing prompts and responses."""
+
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        self._path = Path(path)
+        self._provider = provider
+        self._model = model
+
+    def log(
+        self,
+        *,
+        prompt: Prompt,
+        system: str | None,
+        tool: ToolDefinition | None,
+        params: Mapping[str, Any] | None,
+        result: LLMResult | None,
+        error: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Persist the given prompt/response pair as a JSON line."""
+
+        record: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            "provider": provider or self._provider,
+            "model": model or self._model,
+            "request": {
+                "system": system,
+                "messages": [self._serialise_message(msg) for msg in prompt.messages],
+                "tool": self._serialise_tool(tool),
+                "params": self._clean_params(params),
+            },
+        }
+        if result is not None:
+            record["response"] = {
+                "content": result.content,
+                "tool_name": result.tool_name,
+                "usage": result.usage.as_csv_row() if result.usage else None,
+                "raw_response": self._safe_value(result.raw_response),
+            }
+        if error is not None:
+            record["error"] = error
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False))
+            handle.write("\n")
+
+    def _serialise_message(self, message: PromptMessage) -> dict[str, str]:
+        return {"role": message.role, "content": message.content}
+
+    def _serialise_tool(self, tool: ToolDefinition | None) -> Mapping[str, Any] | None:
+        if tool is None:
+            return None
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": self._safe_value(tool.parameters),
+        }
+
+    def _clean_params(self, params: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if params is None:
+            return None
+        cleaned: dict[str, Any] = {}
+        for key, value in params.items():
+            if value is None:
+                continue
+            cleaned[key] = self._safe_value(value)
+        return cleaned
+
+    def _safe_value(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, Mapping):
+            return {str(k): self._safe_value(v) for k, v in value.items()}
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [self._safe_value(item) for item in value]
+        try:
+            json.dumps(value)  # type: ignore[arg-type]
+            return value
+        except Exception:  # pragma: no cover - defensive fallback
+            return repr(value)
 
 
 from .gemini import GeminiProvider  # noqa: E402,F401

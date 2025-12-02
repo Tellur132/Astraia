@@ -30,7 +30,13 @@ from .llm_interfaces import (
     LLMRunContext,
 )
 from .pareto_summary import ParetoSummaryGenerator
-from .llm_providers import LLMResult, Prompt, PromptMessage, ToolDefinition
+from .llm_providers import (
+    LLMExchangeLogger,
+    LLMResult,
+    Prompt,
+    PromptMessage,
+    ToolDefinition,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .llm_guidance import LLMProposalGenerator
@@ -174,7 +180,7 @@ class MetaSearchAdjuster:
         self._metric_name = metric_name
         self._metric_name_lc = metric_name.lower()
         self._search_space = {name: dict(spec) for name, spec in search_space.items()}
-        self._provider, self._usage_logger = create_llm_provider(llm_cfg)
+        self._provider, self._usage_logger, self._trace_logger = create_llm_provider(llm_cfg)
         self._seed = seed
         self._policies = self._build_policies(policies or [])
         if objectives is None:
@@ -518,6 +524,9 @@ class MetaSearchAdjuster:
             description="Return adjustments to the search strategy using the provided schema.",
             parameters=schema,
         )
+        params = {"temperature": 0.1, "json_mode": False}
+        result: LLMResult | None = None
+        error: str | None = None
         try:
             result = self._provider.generate(
                 prompt,
@@ -526,10 +535,26 @@ class MetaSearchAdjuster:
                 system=self._SYSTEM_PROMPT,
                 tool=tool,
             )
-        except Exception:
+        except Exception as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
+            self._log_exchange(
+                prompt=prompt,
+                system=self._SYSTEM_PROMPT,
+                tool=tool,
+                params=params,
+                result=None,
+                error=error,
+            )
             return None
 
         self._log_usage(result)
+        self._log_exchange(
+            prompt=prompt,
+            system=self._SYSTEM_PROMPT,
+            tool=tool,
+            params=params,
+            result=result,
+        )
         return self._parse_plan(result.content, trials_completed, settings)
 
     def _heuristic_adjustment(
@@ -968,6 +993,27 @@ class MetaSearchAdjuster:
     def _log_usage(self, result: LLMResult) -> None:
         if self._usage_logger is not None:
             self._usage_logger.log(result.usage)
+
+    def _log_exchange(
+        self,
+        *,
+        prompt: Prompt,
+        system: str | None,
+        tool: ToolDefinition | None,
+        params: Mapping[str, Any],
+        result: LLMResult | None,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_logger is None:
+            return
+        self._trace_logger.log(
+            prompt=prompt,
+            system=system,
+            tool=tool,
+            params=params,
+            result=result,
+            error=error,
+        )
 
 
 def create_meta_search_adjuster(

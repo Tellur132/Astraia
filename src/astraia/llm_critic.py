@@ -15,7 +15,7 @@ from .llm_interfaces import (
     LLMRepresentativePoint,
     LLMRunContext,
 )
-from .llm_providers import Prompt, ToolDefinition
+from .llm_providers import LLMExchangeLogger, Prompt, ToolDefinition
 
 
 _SYSTEM_PROMPT = (
@@ -110,11 +110,17 @@ def generate_llm_critique(
         timeline_notes=timeline_notes,
     )
 
-    provider, usage_logger = create_llm_provider(llm_cfg)
+    provider, usage_logger, trace_logger = create_llm_provider(llm_cfg)
     if provider is None:
         return fallback
 
     schema = _critique_schema(multi_objective=multi_objective)
+    tool_def = ToolDefinition(
+        name="render_diagnostic_report",
+        description="Summarise failure diagnosis and actionable recommendations.",
+        parameters=schema,
+    )
+    params = {"temperature": 0.2, "json_mode": False}
     prompt = _build_prompt(
         metadata=metadata,
         metric_names=metric_names,
@@ -133,23 +139,39 @@ def generate_llm_critique(
         schema=schema,
     )
 
+    result = None
+    error: str | None = None
     try:
         result = provider.generate(
             prompt,
             temperature=0.2,
             system=_SYSTEM_PROMPT,
             json_mode=False,
-            tool=ToolDefinition(
-                name="render_diagnostic_report",
-                description="Summarise failure diagnosis and actionable recommendations.",
-                parameters=schema,
-            ),
+            tool=tool_def,
         )
-    except Exception:
+    except Exception as exc:
+        error = f"{exc.__class__.__name__}: {exc}"
+        _log_trace(
+            trace_logger,
+            prompt=prompt,
+            system=_SYSTEM_PROMPT,
+            tool=tool_def,
+            params=params,
+            result=None,
+            error=error,
+        )
         return fallback
 
     if usage_logger is not None:
         usage_logger.log(result.usage)
+    _log_trace(
+        trace_logger,
+        prompt=prompt,
+        system=_SYSTEM_PROMPT,
+        tool=tool_def,
+        params=params,
+        result=result,
+    )
 
     parsed = _parse_structured_critique(result.content, multi_objective=multi_objective)
     if parsed is None:
@@ -918,5 +940,26 @@ def _build_prompt(
     return Prompt.from_text(text)
 
 
-__all__ = ["generate_llm_critique"]
+def _log_trace(
+    logger: LLMExchangeLogger | None,
+    *,
+    prompt: Prompt,
+    system: str | None,
+    tool: ToolDefinition | None,
+    params: Mapping[str, Any],
+    result: Any,
+    error: str | None = None,
+) -> None:
+    if logger is None:
+        return
+    logger.log(
+        prompt=prompt,
+        system=system,
+        tool=tool,
+        params=params,
+        result=result,
+        error=error,
+    )
 
+
+__all__ = ["generate_llm_critique"]

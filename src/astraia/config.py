@@ -374,6 +374,7 @@ class LLMConfig(BaseModel):
     provider: str
     model: str
     usage_log: str | None = None
+    trace_log: str | None = None
     max_calls: int | None = None
     max_tokens_per_run: int | None = None
     budget_usd: float | None = None
@@ -391,6 +392,8 @@ class LLMConfig(BaseModel):
 
         if self.usage_log is not None and not self.usage_log.strip():
             raise ValueError("llm.usage_log must be a non-empty string when provided")
+        if self.trace_log is not None and not self.trace_log.strip():
+            raise ValueError("llm.trace_log must be a non-empty string when provided")
 
         if self.max_calls is not None and self.max_calls <= 0:
             raise ValueError("llm.max_calls must be positive when provided")

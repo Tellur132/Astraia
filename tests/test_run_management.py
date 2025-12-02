@@ -98,9 +98,17 @@ class PrepareRunEnvironmentTests(unittest.TestCase):
                 final_config["llm"]["usage_log"],
                 str(artifacts.llm_usage_path),
             )
+            self.assertIsNotNone(artifacts.llm_trace_path)
+            assert artifacts.llm_trace_path is not None
+            self.assertTrue(artifacts.llm_trace_path.exists())
+            self.assertEqual(
+                final_config["llm"]["trace_log"],
+                str(artifacts.llm_trace_path),
+            )
 
             meta = json.loads(artifacts.meta_path.read_text(encoding="utf-8"))
             self.assertEqual(meta["artifacts"]["llm_usage"], str(artifacts.llm_usage_path))
+            self.assertEqual(meta["artifacts"]["llm_trace"], str(artifacts.llm_trace_path))
             self.assertEqual(meta["status"]["state"], "created")
 
 

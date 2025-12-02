@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, List, Mapping
 
 from astraia.llm_guidance import LLMProposalGenerator, PromptCache
-from astraia.llm_providers import LLMResult, LLMUsage, LLMUsageLogger
+from astraia.llm_providers import LLMExchangeLogger, LLMResult, LLMUsage, LLMUsageLogger
 
 
 class StubProvider:
@@ -52,9 +52,11 @@ def make_generator(
     max_retries: int = 2,
     search_space: Mapping[str, Mapping[str, Any]] | None = None,
     batch_size: int = 2,
+    trace_path: Path | None = None,
 ) -> LLMProposalGenerator:
     provider = StubProvider(responses)
     usage_logger = LLMUsageLogger(tmp_path / "usage.csv")
+    trace_logger = LLMExchangeLogger(trace_path) if trace_path is not None else None
     generator = LLMProposalGenerator(
         search_space=search_space or make_search_space(),
         problem_summary="demo",
@@ -65,6 +67,7 @@ def make_generator(
         max_retries=max_retries,
         provider=provider,
         usage_logger=usage_logger,
+        trace_logger=trace_logger,
         cache=PromptCache(),
         seed=123,
     )
@@ -94,6 +97,31 @@ def test_valid_response_is_cached(tmp_path: Path) -> None:
     assert len(second) == 2
     stub = getattr(generator, "_test_provider")
     assert len(stub.temperatures) == 1
+
+
+def test_logs_prompt_and_response(tmp_path: Path) -> None:
+    payload = {
+        "proposals": [
+            {"theta": 0.1, "depth": 1, "backend": "a"},
+            {"theta": -0.2, "depth": 2, "backend": "b"},
+        ]
+    }
+    trace_path = tmp_path / "trace.jsonl"
+    generator = make_generator(
+        [result_from_payload(payload)],
+        tmp_path=tmp_path,
+        trace_path=trace_path,
+    )
+
+    proposals = generator.propose_batch(2)
+    assert proposals == payload["proposals"]
+
+    lines = [line for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["request"]["messages"]
+    assert record["response"]["content"]
+    assert record["response"]["usage"]["provider"] == "stub"
 
 
 def test_invalid_json_falls_back_to_random(tmp_path: Path) -> None:
@@ -171,4 +199,3 @@ def test_apply_search_space_overrides(tmp_path: Path) -> None:
     assert generator._search_space["theta"]["high"] == 0.25  # type: ignore[attr-defined]
     assert generator._search_space["backend"]["choices"] == ["a", "b"]  # type: ignore[attr-defined]
     assert any("theta" in entry for entry in updates)
-

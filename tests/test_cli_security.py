@@ -53,13 +53,13 @@ class EnvKeyTests(TestCase):
         provider = MagicMock()
         provider.ping = MagicMock()
 
-        with patch("astraia.cli.create_llm_provider", return_value=(provider, None)) as mocked:
+        with patch("astraia.cli.create_llm_provider", return_value=(provider, None, None)) as mocked:
             cli.ping_llm_provider({"provider": "openai", "model": "gpt-4o"})
 
         mocked.assert_called_once()
         provider.ping.assert_called_once()
 
     def test_ping_llm_provider_errors_when_provider_missing(self) -> None:
-        with patch("astraia.cli.create_llm_provider", return_value=(None, None)):
+        with patch("astraia.cli.create_llm_provider", return_value=(None, None, None)):
             with self.assertRaises(SystemExit):
                 cli.ping_llm_provider({"provider": "openai", "model": "gpt-4o"})

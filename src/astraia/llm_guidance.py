@@ -15,6 +15,7 @@ from .llm_providers import (
     LLMResult,
     LLMUsage,
     LLMUsageLogger,
+    LLMExchangeLogger,
     Prompt,
     PromptMessage,
     ProviderUnavailableError,
@@ -28,11 +29,11 @@ def create_llm_provider(
     llm_cfg: Mapping[str, Any] | None,
     *,
     strict: bool = False,
-) -> tuple[Any | None, LLMUsageLogger | None]:
+) -> tuple[Any | None, LLMUsageLogger | None, LLMExchangeLogger | None]:
     """Instantiate an LLM provider and optional usage logger."""
 
     if llm_cfg is None:
-        return None, None
+        return None, None, None
 
     usage_logger: LLMUsageLogger | None = None
     usage_log_path = llm_cfg.get("usage_log")
@@ -41,8 +42,18 @@ def create_llm_provider(
 
     provider_name = str(llm_cfg.get("provider", "")).lower()
     model_name = llm_cfg.get("model")
+
+    trace_logger: LLMExchangeLogger | None = None
+    trace_log_path = llm_cfg.get("trace_log")
+    if trace_log_path:
+        trace_logger = LLMExchangeLogger(
+            trace_log_path,
+            provider=provider_name or None,
+            model=str(model_name) if model_name else None,
+        )
+
     if not provider_name or not model_name:
-        return None, usage_logger
+        return None, usage_logger, trace_logger
 
     provider: Any | None = None
     try:
@@ -83,7 +94,7 @@ def create_llm_provider(
     if guard is not None and guard.has_limits:
         provider = _BudgetedProvider(provider, guard)
 
-    return provider, usage_logger
+    return provider, usage_logger, trace_logger
 
 
 class LLMBudgetGuard:
@@ -260,6 +271,7 @@ class LLMProposalGenerator:
         max_retries: int,
         provider: Any | None,
         usage_logger: LLMUsageLogger | None,
+        trace_logger: LLMExchangeLogger | None,
         cache: PromptCache,
         seed: int | None,
     ) -> None:
@@ -272,6 +284,7 @@ class LLMProposalGenerator:
         self._max_retries = max_retries
         self._provider = provider
         self._usage_logger = usage_logger
+        self._trace_logger = trace_logger
         self._cache = cache
         self._rng = random.Random(seed)
         self._schema_cache: dict[int, Dict[str, Any]] = {}
@@ -310,6 +323,9 @@ class LLMProposalGenerator:
 
         while attempts <= self._max_retries:
             tool = self._proposal_tool(count)
+            params: Dict[str, Any] = {"temperature": temperature, "json_mode": False}
+            result: LLMResult | None = None
+            error: str | None = None
             try:
                 result = self._provider.generate(
                     prompt,
@@ -318,9 +334,36 @@ class LLMProposalGenerator:
                     system=self._SYSTEM_PROMPT,
                     tool=tool,
                 )
-            except RuntimeError:
+            except RuntimeError as exc:
+                error = f"{exc.__class__.__name__}: {exc}"
+                self._log_exchange(
+                    prompt=prompt,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                    params=params,
+                    result=None,
+                    error=error,
+                )
                 break
+            except Exception as exc:
+                error = f"{exc.__class__.__name__}: {exc}"
+                self._log_exchange(
+                    prompt=prompt,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                    params=params,
+                    result=None,
+                    error=error,
+                )
+                raise
             self._log_usage(result)
+            self._log_exchange(
+                prompt=prompt,
+                system=self._SYSTEM_PROMPT,
+                tool=tool,
+                params=params,
+                result=result,
+            )
             proposals = self._parse_and_validate(result, expected=count)
             if proposals is not None:
                 unique = self._ensure_unique_batch(proposals, expected=count)
@@ -392,6 +435,27 @@ class LLMProposalGenerator:
     def _log_usage(self, result: LLMResult) -> None:
         if self._usage_logger is not None:
             self._usage_logger.log(result.usage)
+
+    def _log_exchange(
+        self,
+        *,
+        prompt: Prompt,
+        system: str | None,
+        tool: ToolDefinition | None,
+        params: Mapping[str, Any],
+        result: LLMResult | None,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_logger is None:
+            return
+        self._trace_logger.log(
+            prompt=prompt,
+            system=system,
+            tool=tool,
+            params=params,
+            result=result,
+            error=error,
+        )
 
     def _cache_key(self, count: int) -> str:
         signature = json.dumps(self._search_space, sort_keys=True, ensure_ascii=False)
@@ -898,7 +962,7 @@ def create_proposal_generator(
     min_temperature = float(guidance_cfg.get("min_temperature", 0.1))
 
     effective_llm_cfg = preferred_llm_cfg or llm_cfg
-    provider, usage_logger = create_llm_provider(effective_llm_cfg)
+    provider, usage_logger, trace_logger = create_llm_provider(effective_llm_cfg)
 
     return LLMProposalGenerator(
         search_space=search_space,
@@ -910,6 +974,7 @@ def create_proposal_generator(
         max_retries=max_retries,
         provider=provider,
         usage_logger=usage_logger,
+        trace_logger=trace_logger,
         cache=_PROMPT_CACHE,
         seed=seed,
     )
