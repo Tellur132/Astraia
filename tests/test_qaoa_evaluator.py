@@ -70,6 +70,21 @@ class QAOAEvaluatorEnergyTests(unittest.TestCase):
         self.assertAlmostEqual(energy, -4.0)
         self.assertCountEqual(bitstrings, ["0101", "1010"])
 
+    def test_ring_exact_energy_and_success_probability_bounds(self) -> None:
+        edges = ((0, 1), (1, 2), (2, 3), (3, 0))
+        energy, bitstrings = solve_maxcut_exact(4, edges)
+        self.assertAlmostEqual(energy, -4.0)
+        self.assertCountEqual(bitstrings, ["0101", "1010"])
+
+        evaluator = QAOAEvaluator(num_qubits=4, edges=edges)
+        metrics = evaluator({"gamma_0": 0.0, "beta_0": 0.0})
+
+        self.assertAlmostEqual(metrics["metric_energy_exact"], -4.0)
+        success = metrics["metric_success_prob_opt"]
+        self.assertIsNotNone(success)
+        self.assertGreaterEqual(success, 0.0)
+        self.assertLessEqual(success, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
