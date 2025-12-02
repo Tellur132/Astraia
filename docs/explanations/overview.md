@@ -18,5 +18,5 @@
 ## コンポーネント
 - CLI (`astraia`): 設定検証、探索実行、成果物閲覧、実行履歴管理のエントリポイント。
 - Evaluator / Config 群: qGAN、ZDT3、多目的 qGAN、量子回路評価などのテンプレートを同梱。
-- Docs (`docs/`): 1 ページ 1 項目で手順・計画を整理。各ガイドは `docs/index.md` から辿れます。
+- Docs (`docs/`): 1 ページ 1 項目で手順・計画を整理。How-to / Reference / Explanations / Decisions は `docs/index.md` から辿れます。
 - GUI バックエンド（実験的）: FastAPI + React。設定閲覧、dry-run、実行開始/キャンセル、LLM あり/なし比較を HTTP 経由で操作。

@@ -30,11 +30,11 @@ Astraia は YAML 設定から Optuna ベースの探索ループを自動生成�
 
 ## ドキュメント
 - 全体の目次: `docs/index.md`
-- 概要: `docs/guides/overview.md`
-- セットアップ: `docs/guides/setup_install.md`
-- CLI 手順: `docs/guides/cli_quickstart.md`, `docs/guides/cli_reference.md`
-- サンプル設定と成果物: `docs/guides/sample_configs.md`, `docs/guides/run_artifacts.md`
-- GUI バックエンド（実験的）: `docs/guides/gui_backend_usage.md`
+- 概要: `docs/explanations/overview.md`
+- セットアップ: `docs/howto/setup_install.md`
+- CLI 手順: `docs/howto/cli_quickstart.md`, `docs/reference/cli_reference.md`
+- サンプル設定と成果物: `docs/reference/sample_configs.md`, `docs/reference/run_artifacts.md`
+- GUI バックエンド（実験的）: `docs/howto/gui_backend_usage.md`
 
 ## 状態メモ
 - CLI と同梱 evaluator / config は MVP 相当の機能を提供中。
