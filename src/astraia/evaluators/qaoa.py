@@ -11,7 +11,7 @@ from qiskit import QuantumCircuit
 from qiskit.quantum_info import DensityMatrix, Statevector, state_fidelity
 
 from .base import EvaluatorResult
-from .exact_solvers import Edge, build_maxcut_operator, solve_cost_hamiltonian_ground_state
+from .exact_solvers import Edge, build_maxcut_operator, solve_maxcut_exact
 from .noise_simulation import NISQNoiseConfig, simulate_noisy_density_matrix
 
 
@@ -53,6 +53,9 @@ class QAOAEvaluator:
     num_qubits: int = 2
     edges: Tuple[Edge, ...] = ((0, 1),)
     noise_simulation: NISQNoiseConfig | None = None
+    exact_solution_enabled: bool = True
+    exact_solution_method: str = "brute_force"
+    exact_solution_max_qubits: int | None = 24
 
     def __call__(self, params: Mapping[str, Any], seed: int | None = None) -> EvaluatorResult:  # noqa: ARG002 - seed reserved
         start = time.perf_counter()
@@ -70,16 +73,38 @@ class QAOAEvaluator:
         state = Statevector.from_instruction(circuit)
 
         cost_operator = build_maxcut_operator(self.num_qubits, self.edges)
-        exact_energy, optimal_bitstrings = solve_cost_hamiltonian_ground_state(
-            cost_operator, num_qubits=self.num_qubits
-        )
-        target = _bitstrings_to_statevector(optimal_bitstrings, self.num_qubits)
         # Lower energy (more negative) corresponds to larger cuts with this H_C.
         energy = float(np.real(state.expectation_value(cost_operator)))
-        energy_gap = energy - exact_energy
-        success_prob = _success_probability(state, optimal_bitstrings)
 
-        fidelity = float(state_fidelity(state, target))
+        optimal_bitstrings: Sequence[str] = ()
+        exact_energy = None
+        target: Statevector | None = None
+        success_prob = None
+        energy_gap = None
+        compute_exact = self.exact_solution_enabled and (
+            self.exact_solution_max_qubits is None
+            or self.num_qubits <= int(self.exact_solution_max_qubits)
+        )
+        if compute_exact:
+            try:
+                exact_energy, bitstrings = solve_maxcut_exact(
+                    self.num_qubits,
+                    self.edges,
+                    max_qubits=self.exact_solution_max_qubits,
+                )
+                optimal_bitstrings = bitstrings
+                target = _bitstrings_to_statevector(optimal_bitstrings, self.num_qubits)
+                energy_gap = energy - exact_energy
+                success_prob = _success_probability(state, optimal_bitstrings)
+            except Exception:
+                # Skip exact comparison if it fails; continue with primary metrics.
+                exact_energy = None
+                optimal_bitstrings = ()
+                target = None
+                success_prob = None
+                energy_gap = None
+
+        fidelity = float(state_fidelity(state, target)) if target is not None else None
 
         depth = float(circuit.depth() or 0)
         gate_count = float(len(circuit.data))
@@ -91,15 +116,21 @@ class QAOAEvaluator:
                     circuit, self.noise_simulation, seed=seed
                 )
                 noisy_energy = float(np.real(noisy_state.expectation_value(cost_operator)))
-                noisy_success = _success_probability(noisy_state, optimal_bitstrings)
-                noisy_fidelity = float(state_fidelity(noisy_state, target))
+                noisy_success = (
+                    _success_probability(noisy_state, optimal_bitstrings)
+                    if optimal_bitstrings
+                    else None
+                )
+                noisy_fidelity = float(state_fidelity(noisy_state, target)) if target is not None else None
                 noise_metrics = {
                     "metric_energy_noisy": noisy_energy,
                     "metric_fidelity_noisy": noisy_fidelity,
                     "metric_energy_delta": noisy_energy - energy,
-                    "metric_fidelity_delta": fidelity - noisy_fidelity,
+                    "metric_fidelity_delta": fidelity - noisy_fidelity if fidelity is not None and noisy_fidelity is not None else None,
                     "metric_success_prob_opt_noisy": noisy_success,
-                    "metric_success_prob_opt_delta": noisy_success - success_prob,
+                    "metric_success_prob_opt_delta": noisy_success - success_prob
+                    if noisy_success is not None and success_prob is not None
+                    else None,
                     "noise_model_label": self.noise_simulation.label,
                     "noise_status": "ok",
                 }
@@ -130,10 +161,20 @@ def create_qaoa_evaluator(config: Mapping[str, Any]) -> QAOAEvaluator:
     num_qubits = int(config.get("num_qubits", 2))
     edges = tuple(tuple(edge) for edge in config.get("edges", ((0, 1),)))
     noise_cfg = NISQNoiseConfig.from_mapping(config.get("noise_simulation"))
+    exact_cfg = config.get("exact_solution", {})
+    exact_enabled = bool(exact_cfg.get("enabled", True))
+    exact_method = str(exact_cfg.get("method", "brute_force"))
+    max_qubits = exact_cfg.get("max_qubits")
+    exact_max_qubits = int(max_qubits) if max_qubits is not None else None
+    if exact_max_qubits is not None and exact_max_qubits < 0:
+        exact_max_qubits = None
     return QAOAEvaluator(
         num_qubits=num_qubits,
         edges=edges,  # type: ignore[arg-type]
         noise_simulation=noise_cfg,
+        exact_solution_enabled=exact_enabled,
+        exact_solution_method=exact_method,
+        exact_solution_max_qubits=exact_max_qubits,
     )
 
 

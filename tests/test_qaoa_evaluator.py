@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 
+from astraia.evaluators import exact_solvers
 from astraia.evaluators.exact_solvers import (
     build_maxcut_operator,
     solve_cost_hamiltonian_ground_state,
@@ -36,6 +37,31 @@ class QAOAEvaluatorEnergyTests(unittest.TestCase):
         self.assertGreater(metrics["metric_energy"], metrics["metric_energy_exact"])
         self.assertAlmostEqual(metrics["metric_energy_gap"], 0.5)
         self.assertAlmostEqual(metrics["metric_success_prob_opt"], 0.5)
+
+    def test_exact_solution_cache_reuses_results(self) -> None:
+        exact_solvers._MAXCUT_CACHE.clear()
+        edges = ((0, 1),)
+        first_energy, first_bits = solve_maxcut_exact(2, edges)
+        cache_size = len(exact_solvers._MAXCUT_CACHE)
+        second_energy, second_bits = solve_maxcut_exact(2, edges)
+
+        self.assertEqual(cache_size, len(exact_solvers._MAXCUT_CACHE))
+        self.assertEqual(first_energy, second_energy)
+        self.assertEqual(first_bits, second_bits)
+
+    def test_exact_computation_skips_when_over_max_qubits(self) -> None:
+        evaluator = QAOAEvaluator(
+            num_qubits=3,
+            edges=((0, 1), (1, 2), (2, 0)),
+            exact_solution_max_qubits=1,
+        )
+        metrics = evaluator({"gamma_0": 0.0, "beta_0": 0.0})
+
+        self.assertIn("metric_energy_exact", metrics)
+        self.assertIsNone(metrics["metric_energy_exact"])
+        self.assertIsNone(metrics["metric_energy_gap"])
+        self.assertIsNone(metrics["metric_success_prob_opt"])
+        self.assertIsNone(metrics["metric_fidelity"])
 
     def test_maxcut_exact_returns_all_degenerate_bitstrings(self) -> None:
         edges = ((0, 1), (1, 2), (2, 3), (3, 0))

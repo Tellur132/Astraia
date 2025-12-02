@@ -53,3 +53,9 @@ astraia visualize --run-id qaoa_llm_guided --type history --metric energy
 - レイヤー上限を変える: `search_space.n_layers.high` と gamma/beta の数を揃え、必要なら `max_trials` を増やす。
 - ノイズなしで試す: `noise_simulation.enabled: false`。
 - コスト削減: `llm_critic.enabled: false` にしてクリティックを止める、`n_trials` を減らす。
+
+## 7. 厳密解比較の見方と切り替え
+- コストハミルトニアンは `H_C = Σ(0.5 Z_i Z_j - 0.5 I)`（値がより負ほど良い）。`metric_energy_exact` がその最小固有値、`metric_energy_gap` が現在の状態との差です。
+- `metric_success_prob_opt` は最適ビット列（縮退込み）を測る確率。ノイズありは `_noisy`、差分は `_delta`。
+- 厳密解は (num_qubits, edges, weights) でキャッシュするので同じグラフなら毎回の全探索を省きます。
+- 大きなグラフで厳密解が重い場合は `evaluator.exact_solution.max_qubits` を下げるか `enabled: false` にすると、エネルギーなど主要メトリクスはそのままに「厳密比較だけスキップ」します（`status` は `ok` のまま）。

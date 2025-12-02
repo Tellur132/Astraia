@@ -104,6 +104,10 @@ evaluator:
     - [1, 2]
     - [2, 3]
     - [3, 0]
+  exact_solution:
+    enabled: true
+    method: brute_force
+    max_qubits: 24
   noise_simulation:
     enabled: true
     label: nisq_mock
@@ -116,6 +120,11 @@ report:
   filename: qaoa_llm_guided.md
   metrics:
     - energy
+    - energy_exact
+    - energy_gap
+    - success_prob_opt
+    - success_prob_opt_noisy
+    - success_prob_opt_delta
     - energy_noisy
     - energy_delta
     - fidelity

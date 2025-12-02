@@ -71,12 +71,44 @@ def solve_cost_hamiltonian_ground_state(
     return best_energy, bitstrings
 
 
+_MAXCUT_CACHE: dict[tuple[int, Tuple[Edge, ...], Tuple[float, ...] | None], tuple[float, Tuple[str, ...]]] = {}
+
+
+def _maxcut_cache_key(
+    num_qubits: int, edges: Sequence[Edge], weights: Sequence[float] | None
+) -> tuple[int, Tuple[Edge, ...], Tuple[float, ...] | None]:
+    edge_key = tuple((int(i), int(j)) for i, j in edges)
+    weight_key = None if weights is None else tuple(float(w) for w in weights)
+    return int(num_qubits), edge_key, weight_key
+
+
 def solve_maxcut_exact(
-    num_qubits: int, edges: Sequence[Edge], weights: Sequence[float] | None = None
+    num_qubits: int,
+    edges: Sequence[Edge],
+    weights: Sequence[float] | None = None,
+    *,
+    max_qubits: int | None = None,
+    use_cache: bool = True,
 ) -> tuple[float, list[str]]:
-    """Convenience wrapper to solve MaxCut exactly using the shared H_C definition."""
+    """Convenience wrapper to solve MaxCut exactly using the shared H_C definition.
+
+    The result is cached by (num_qubits, edges, weights) to avoid repeated brute-force
+    enumeration for identical graphs.
+    """
+    if max_qubits is not None and num_qubits > max_qubits:
+        raise ValueError(f"Exact MaxCut skipped: num_qubits={num_qubits} exceeds max_qubits={max_qubits}")
+
+    key = _maxcut_cache_key(num_qubits, edges, weights)
+    if use_cache and key in _MAXCUT_CACHE:
+        energy, bitstrings = _MAXCUT_CACHE[key]
+        return energy, list(bitstrings)
+
     cost_operator = build_maxcut_operator(num_qubits, edges, weights)
-    return solve_cost_hamiltonian_ground_state(cost_operator, num_qubits=num_qubits)
+    energy, bitstrings = solve_cost_hamiltonian_ground_state(cost_operator, num_qubits=num_qubits)
+
+    if use_cache:
+        _MAXCUT_CACHE[key] = (energy, tuple(bitstrings))
+    return energy, bitstrings
 
 
 __all__ = [

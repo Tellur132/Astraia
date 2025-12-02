@@ -27,7 +27,7 @@ evaluator:
 ## QFT/MaxCut のサンプル evaluator
 
 - **QFT 合成** (`configs/quantum/qft_fidelity_depth.yaml`): QFT 近似の忠実度と回路深さを多目的最適化するテンプレートです。`noise_model` を与えると `metric_error_probability` も計算されます。
-- **QAOA (MaxCut)** (`configs/quantum/qaoa_small.yaml`): 小規模グラフに対する QAOA のエネルギー（`metric_energy`）と忠実度（`metric_fidelity`）を返します。コストハミルトニアンは `H_C = Σ(0.5 Z_i Z_j - 0.5 I)` で、値が小さいほど（より負になるほど）良いカットです。同じ `H_C` から厳密エネルギー `metric_energy_exact` とギャップ `metric_energy_gap`、最適ビット列の成功確率 `metric_success_prob_opt`（ノイズありは `_noisy` / `_delta` も）を返します。`n_layers` をパラメタに含めることでレイヤー数を探索できます。
+- **QAOA (MaxCut)** (`configs/quantum/qaoa_small.yaml`): 小規模グラフに対する QAOA のエネルギー（`metric_energy`）と忠実度（`metric_fidelity`）を返します。コストハミルトニアンは `H_C = Σ(0.5 Z_i Z_j - 0.5 I)` で、値が小さいほど（より負になるほど）良いカットです。同じ `H_C` から厳密エネルギー `metric_energy_exact` とギャップ `metric_energy_gap`、最適ビット列の成功確率 `metric_success_prob_opt`（ノイズありは `_noisy` / `_delta` も）を返します。厳密解比較は `(num_qubits, edges, weights)` でキャッシュされ、`exact_solution.max_qubits` を超える場合や `enabled: false` ではスキップして探索を継続します。`n_layers` をパラメタに含めることでレイヤー数を探索できます。
 
 いずれも `pip install -e .[quantum]` で依存関係を満たした後、`astraia --config <file>` で即座に実行できます。`--summarize` / `--as-json` は設定検証のみを行うため、LLM なしで動作確認したい場合に便利です。
 
