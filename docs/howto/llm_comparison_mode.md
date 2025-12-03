@@ -60,7 +60,17 @@
    jq '.summary' runs/comparisons/qaoa_llm_pair-llm-comparison.json
    # 例: { "shared_seed":1234, "llm_enabled":{...}, "llm_disabled":{...}, "deltas":{ "energy":-0.12, "depth":0.0 } }
    ```
-   さらに詳細を見たい場合は `runs/<run_id>/log.csv` や `report.md` を個別に確認してください。CLI の比較表で見たい場合は `astraia runs compare --runs <llm> <baseline> --metric energy --stat best` も利用できます。
+さらに詳細を見たい場合は `runs/<run_id>/log.csv` や `report.md` を個別に確認してください。CLI の比較表で見たい場合は `astraia runs compare --runs <llm> <baseline> --metric energy --stat best` も利用できます。
+
+### CLI だけで no-LLM / init-only / mixed / full をまとめて回す
+GUI を使わずに 4 パターンを一括実行したい場合は `ab-template` サブコマンドが使えます。同じ seed で LLM なし / 初期トライアルのみ LLM / 混合 / フル LLM を連続実行し、`summary.json` に LLM 呼び出しや Pareto 指標を保存します。
+
+```bash
+astraia runs ab-template --config configs/quantum/qaoa_llm_guided.yaml \
+  --seed 1234 --init-trials 6 --mix-ratio 0.4
+```
+
+完了すると各 run の `run_id` / `best_value` / `hypervolume` / `llm_calls` / `llm_accept_rate` を含む表が出力され、`runs/<run_id>/summary.json` にも同じ指標が記録されます。
 
 ## 検証（成功判定）
 - `runs/<run_id>/` と `runs/<run_id>-no-llm/` が両方生成され、`meta.json.artifacts.llm_comparison` が同じ比較レコードを指している。

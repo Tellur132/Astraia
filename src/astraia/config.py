@@ -494,15 +494,23 @@ class LLMGuidanceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    mode: str = "full"
     problem_summary: str | None = None
     objective: str | None = None
     n_proposals: int = 1
     max_retries: int = 2
     base_temperature: float = 0.7
     min_temperature: float = 0.1
+    init_trials: int = 5
+    mix_ratio: float = 0.5
+    max_llm_trials: int | None = None
 
     @model_validator(mode="after")
     def validate_fields(self) -> "LLMGuidanceConfig":
+        self.mode = str(self.mode or "full").strip().lower()
+        if self.mode not in {"full", "init_only", "mixed"}:
+            raise ValueError("llm_guidance.mode must be one of full, init_only, mixed")
+
         if self.enabled:
             if not (self.problem_summary and self.problem_summary.strip()):
                 raise ValueError(
@@ -530,6 +538,12 @@ class LLMGuidanceConfig(BaseModel):
             raise ValueError(
                 "llm_guidance.min_temperature must be less than or equal to base_temperature"
             )
+        if self.init_trials <= 0:
+            raise ValueError("llm_guidance.init_trials must be positive")
+        if not (0.0 <= self.mix_ratio <= 1.0):
+            raise ValueError("llm_guidance.mix_ratio must be between 0 and 1")
+        if self.max_llm_trials is not None and self.max_llm_trials <= 0:
+            raise ValueError("llm_guidance.max_llm_trials must be positive when provided")
         return self
 
 

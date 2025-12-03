@@ -422,10 +422,18 @@ def _watch_job(record: JobRecord) -> None:
             else:
                 payload.setdefault("note", "Run terminated without status payload.")
 
+        artifacts_payload = None
+        if isinstance(payload, Mapping):
+            artifacts_payload = payload.get("artifacts")
+            if artifacts_payload is not None:
+                payload = dict(payload)
+                payload.pop("artifacts", None)
+
         update_run_status(
             record.run_id,
             final_status,
             runs_root=record.runs_root,
+            artifacts=_json_ready(artifacts_payload) if artifacts_payload else None,
             **_json_ready(payload),
         )
         _remove_job(record.run_id)
@@ -444,8 +452,18 @@ def _run_worker(config: Mapping[str, Any], run_id: str, runs_root: str, status_q
             payload["total_cost"] = result.total_cost
         if result.hypervolume is not None:
             payload["hypervolume"] = result.hypervolume
+        if result.llm_trials is not None:
+            payload["llm_trials"] = result.llm_trials
+        if result.llm_accept_rate is not None:
+            payload["llm_accept_rate"] = result.llm_accept_rate
         if result.early_stopped_reason:
             payload["note"] = result.early_stopped_reason
+        artifacts: dict[str, Any] = {}
+        if result.summary_path is not None:
+            artifacts["summary"] = str(result.summary_path)
+        if artifacts:
+            payload["artifacts"] = artifacts
+
         status_queue.put({"status": "completed", "payload": _json_ready(payload)})
     except KeyboardInterrupt:
         status_queue.put({"status": "failed", "payload": {"note": "Run interrupted (SIGINT)."}})

@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import shutil
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Sequence
@@ -30,6 +31,7 @@ from .visualization import ObjectiveSpec, VisualizationError, plot_history, plot
 
 if TYPE_CHECKING:
     from .optimization import OptimizationResult
+    from .run_management import RunArtifacts
 
 
 def parse_args() -> argparse.Namespace:
@@ -335,6 +337,36 @@ def _configure_runs_subcommands(
         "--json",
         action="store_true",
         help="Emit JSON instead of a formatted table.",
+    )
+
+    ab_parser = runs_subparsers.add_parser(
+        "ab-template",
+        help="Run no-LLM/init-only/mixed/full variants with a shared seed.",
+        description="Generate four LLM comparison runs (off/init/mixed/full) using the same config and seed.",
+    )
+    _add_runs_root_argument(ab_parser)
+    ab_parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="Path to the base optimization configuration YAML file.",
+    )
+    ab_parser.add_argument(
+        "--seed",
+        type=int,
+        help="Shared seed applied to all variants (default: use config seed or derive from run name).",
+    )
+    ab_parser.add_argument(
+        "--init-trials",
+        type=int,
+        default=5,
+        help="Number of initial trials to allocate to LLM proposals in init-only mode (default: 5).",
+    )
+    ab_parser.add_argument(
+        "--mix-ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of trials sourced from LLM proposals in mixed mode (0-1, default: 0.5).",
     )
 
 
@@ -680,10 +712,16 @@ def format_result(result: "OptimizationResult") -> str:
         lines.append(f"Total cost      : {result.total_cost}")
     if result.hypervolume is not None:
         lines.append(f"Hypervolume     : {result.hypervolume}")
+    if result.llm_trials is not None:
+        lines.append(f"LLM trials      : {result.llm_trials}")
+    if result.llm_accept_rate is not None:
+        lines.append(f"LLM accept rate : {result.llm_accept_rate:.3f}")
     if result.pareto_front:
         lines.append(f"Pareto points   : {len(result.pareto_front)}")
     if result.early_stopped_reason:
         lines.append(f"Early stop      : {result.early_stopped_reason}")
+    if result.summary_path is not None:
+        lines.append(f"Summary         : {result.summary_path}")
     return "\n".join(lines)
 
 
@@ -701,6 +739,8 @@ def _handle_runs_command(args: argparse.Namespace) -> None:
         _runs_diff_command(args)
     elif command == "compare":
         _runs_compare_command(args)
+    elif command == "ab-template":
+        _runs_ab_template_command(args)
     else:  # pragma: no cover - argparse prevents this path
         raise SystemExit(f"Unknown runs sub-command: {command}")
 
@@ -1027,6 +1067,145 @@ def _runs_compare_command(args: argparse.Namespace) -> None:
         return
 
     print(_render_table(headers, rows))
+
+
+def _runs_ab_template_command(args: argparse.Namespace) -> None:
+    if getattr(args, "init_trials", 0) <= 0:
+        raise SystemExit("--init-trials must be a positive integer")
+    mix_ratio = float(getattr(args, "mix_ratio", 0.0))
+    if not (0.0 <= mix_ratio <= 1.0):
+        raise SystemExit("--mix-ratio must be between 0 and 1")
+
+    base_model = load_config(args.config)
+    if base_model.llm is None:
+        raise SystemExit("ab-template requires an llm block in the base config.")
+    if base_model.llm_guidance is None:
+        raise SystemExit("ab-template requires an llm_guidance block in the base config.")
+
+    env_file = Path(os.environ.get("ASTRAIA_ENV_FILE", ".env"))
+    ensure_env_keys(base_model.model_dump(mode="python").get("llm"), env_path=env_file)
+
+    shared_seed = _resolve_shared_seed_value(getattr(args, "seed", None), base_model)
+
+    variants: list[tuple[str, OptimizationConfig]] = [
+        ("no-llm", _build_ab_variant(base_model, mode="no_llm", seed=shared_seed, runs_root=args.runs_root, init_trials=args.init_trials, mix_ratio=mix_ratio)),
+        ("llm-init", _build_ab_variant(base_model, mode="init_only", seed=shared_seed, runs_root=args.runs_root, init_trials=args.init_trials, mix_ratio=mix_ratio)),
+        ("llm-mixed", _build_ab_variant(base_model, mode="mixed", seed=shared_seed, runs_root=args.runs_root, init_trials=args.init_trials, mix_ratio=mix_ratio)),
+        ("llm-full", _build_ab_variant(base_model, mode="full", seed=shared_seed, runs_root=args.runs_root, init_trials=args.init_trials, mix_ratio=mix_ratio)),
+    ]
+
+    from .optimization import run_optimization
+
+    results: list[tuple[str, RunArtifacts, OptimizationResult]] = []
+    for label, variant_model in variants:
+        config_for_run, artifacts = prepare_run_environment(
+            variant_model, config_source=args.config, runs_root=args.runs_root
+        )
+        result = run_optimization(config_for_run)
+        results.append((label, artifacts, result))
+
+    headers = [
+        "mode",
+        "run_id",
+        "best_value",
+        "pareto",
+        "hypervolume",
+        "llm_calls",
+        "llm_trials",
+        "llm_accept_rate",
+    ]
+    rows: list[list[str]] = []
+    for label, artifacts, result in results:
+        summary = result.summary or {}
+        rows.append(
+            [
+                label,
+                artifacts.run_id,
+                _format_best_value(result.best_value),
+                str(len(result.pareto_front or [])),
+                _format_best_value(result.hypervolume),
+                str(summary.get("llm_calls", 0)),
+                str(summary.get("llm_trials", result.llm_trials or 0)),
+                _format_best_value(result.llm_accept_rate),
+            ]
+        )
+
+    print(_render_table(headers, rows))
+    print(f"Shared seed: {shared_seed}")
+    for _, artifacts, result in results:
+        print(f"- {artifacts.run_id}: {artifacts.run_dir} (summary: {result.summary_path})")
+
+
+def _build_ab_variant(
+    base: OptimizationConfig,
+    *,
+    mode: str,
+    seed: int | None,
+    runs_root: Path,
+    init_trials: int,
+    mix_ratio: float,
+) -> OptimizationConfig:
+    data = base.model_dump(mode="python")
+    base_name = data.get("metadata", {}).get("name") or "run"
+    suffix = {
+        "no_llm": "no-llm",
+        "init_only": "llm-init",
+        "mixed": "llm-mixed",
+        "full": "llm-full",
+    }[mode]
+    run_name = f"{base_name}-{suffix}"
+
+    metadata = dict(data.get("metadata") or {})
+    metadata["name"] = run_name
+    data["metadata"] = metadata
+
+    if seed is not None:
+        data["seed"] = seed
+
+    artifacts = dict(data.get("artifacts") or {})
+    artifacts["run_root"] = str(Path(runs_root) / run_name)
+    data["artifacts"] = artifacts
+
+    if mode == "no_llm":
+        data["llm"] = None
+        if isinstance(data.get("llm_guidance"), Mapping):
+            disabled = dict(data["llm_guidance"])
+            disabled["enabled"] = False
+            data["llm_guidance"] = disabled
+        if isinstance(data.get("llm_critic"), Mapping):
+            critic = dict(data["llm_critic"])
+            critic["enabled"] = False
+            data["llm_critic"] = critic
+        if isinstance(data.get("planner"), Mapping):
+            planner = dict(data["planner"])
+            planner["enabled"] = False
+            data["planner"] = planner
+    else:
+        guidance = dict(data.get("llm_guidance") or {})
+        if not guidance:
+            raise SystemExit("LLM modes require llm_guidance configuration.")
+        guidance["enabled"] = True
+        if mode == "init_only":
+            guidance["mode"] = "init_only"
+            guidance["init_trials"] = init_trials
+        elif mode == "mixed":
+            guidance["mode"] = "mixed"
+            guidance["mix_ratio"] = mix_ratio
+        else:
+            guidance["mode"] = "full"
+        data["llm_guidance"] = guidance
+
+    return OptimizationConfig.model_validate(data)
+
+
+def _resolve_shared_seed_value(candidate: int | None, model: OptimizationConfig) -> int | None:
+    if candidate is not None:
+        return candidate
+    if model.seed is not None:
+        return model.seed
+    name = model.metadata.name or "run"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    return int(digest, 16) % 1_000_000_000
 
 
 def _render_config_diff(

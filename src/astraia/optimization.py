@@ -26,6 +26,7 @@ from .meta_search import (
     create_meta_search_adjuster,
 )
 from .planner import create_planner_agent
+from .run_summary import write_run_summary
 
 
 @dataclass
@@ -40,12 +41,65 @@ class OptimizationResult:
     pareto_front: List[Dict[str, Any]] | None = None
     hypervolume: float | None = None
     total_cost: float | None = None
+    llm_trials: int | None = None
+    llm_accept_rate: float | None = None
+    summary_path: Path | None = None
+    summary: Dict[str, Any] | None = None
+
+
+def _seed_global_generators(seed: int | None) -> None:
+    if seed is None:
+        return
+    random.seed(seed)
+    try:
+        import numpy as np  # type: ignore
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+
+
+class LLMTrialScheduler:
+    """Gate LLM proposal usage for init-only or mixed schedules."""
+
+    def __init__(self, cfg: Mapping[str, Any] | None, *, seed: int | None) -> None:
+        mode = str(cfg.get("mode", "full") if cfg is not None else "full").lower()
+        self._mode = mode if mode in {"full", "init_only", "mixed"} else "full"
+        self._init_trials = int(cfg.get("init_trials", 5)) if cfg else 5
+        self._mix_ratio = float(cfg.get("mix_ratio", 0.5)) if cfg else 0.5
+        max_trials = cfg.get("max_llm_trials") if cfg else None
+        self._max_llm_trials = int(max_trials) if max_trials is not None else None
+        self._rng = random.Random(seed)
+        self._llm_trials: int = 0
+
+    @property
+    def llm_trials(self) -> int:
+        return self._llm_trials
+
+    def allow_llm(self, trials_completed: int) -> bool:
+        if self._max_llm_trials is not None and self._llm_trials >= self._max_llm_trials:
+            return False
+        if self._mode == "init_only":
+            return trials_completed < self._init_trials
+        if self._mode == "mixed":
+            if self._mix_ratio <= 0.0:
+                return False
+            if self._mix_ratio >= 1.0:
+                return True
+            return self._rng.random() < self._mix_ratio
+        return self._mode != "off"
+
+    def record_trial(self, used_llm: bool) -> None:
+        if used_llm:
+            self._llm_trials += 1
 
 
 def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     """Execute the optimization loop using the provided configuration."""
 
     ensure_directories(config)
+    seed = config.get("seed")
+    _seed_global_generators(seed)
     evaluator = load_evaluator(config["evaluator"])
     search_cfg: Dict[str, Any] = dict(config["search"])
     library = str(search_cfg.get("library", "")).lower()
@@ -55,8 +109,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     metric_names, direction_names = _collect_search_objectives(search_cfg)
     primary_metric = metric_names[0]
 
-    sampler = build_sampler(search_cfg, config.get("seed"))
-    study = create_study(search_cfg, sampler, direction_names, seed=config.get("seed"))
+    sampler = build_sampler(search_cfg, seed)
+    study = create_study(search_cfg, sampler, direction_names, seed=seed)
 
     stopping_cfg = config.get("stopping", {})
     max_trials = int(stopping_cfg.get("max_trials", search_cfg["n_trials"]))
@@ -64,8 +118,6 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     patience_value = stopping_cfg.get("no_improve_patience")
     cost_metric = stopping_cfg.get("cost_metric")
     max_total_cost = stopping_cfg.get("max_total_cost")
-    seed = config.get("seed")
-
     target_trials = int(search_cfg.get("n_trials", max_trials))
     settings = SearchSettings(
         sampler=str(search_cfg.get("sampler", "tpe")).lower(),
@@ -83,6 +135,11 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         seed=seed,
         preferred_llm_cfg=candidate_llm_override,
     )
+    llm_scheduler = (
+        LLMTrialScheduler(config.get("llm_guidance"), seed=seed)
+        if proposal_generator is not None
+        else None
+    )
     pending_proposals: deque[Dict[str, Any]] = deque()
 
     planner_agent = create_planner_agent(
@@ -99,6 +156,7 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     best_metrics: Dict[str, MetricValue] = {}
     best_params: Dict[str, Any] = {}
     total_cost = 0.0 if cost_metric is not None else None
+    llm_trials_used = 0
 
     study_directions = study.directions
     primary_direction = study_directions[0]
@@ -137,7 +195,11 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     early_stop_reason = "max_time_minutes reached"
                     break
 
-            if proposal_generator is not None:
+            llm_allowed = proposal_generator is not None
+            if llm_allowed and llm_scheduler is not None:
+                llm_allowed = llm_scheduler.allow_llm(trials_completed)
+
+            if llm_allowed and proposal_generator is not None:
                 proposal_generator.update_context(llm_context)
                 while not pending_proposals:
                     remaining = max_trials - trials_completed
@@ -154,8 +216,12 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     pending_proposals.extend(batch)
                 if pending_proposals:
                     study.enqueue_trial(pending_proposals.popleft())
+            else:
+                pending_proposals.clear()
 
             trial = study.ask()
+            fixed_params = getattr(trial, "_fixed_params", {}) or {}
+            is_llm_trial = bool(fixed_params)
             params = sample_params(trial, search_space)
             metrics, objective_values = _execute_trial(
                 trial,
@@ -296,6 +362,44 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         seed=seed,
     )
 
+    llm_accept_rate = (
+        llm_trials_used / trials_completed if trials_completed > 0 else None
+    )
+
+    summary_payload: Dict[str, Any] | None = None
+    summary_path: Path | None = None
+    llm_usage_path: Path | None = None
+    llm_cfg = config.get("llm")
+    if isinstance(llm_cfg, Mapping):
+        usage_value = llm_cfg.get("usage_log")
+        if usage_value:
+            llm_usage_path = Path(usage_value)
+
+    artifacts_cfg = config.get("artifacts") if isinstance(config, Mapping) else {}
+    run_root_value = None
+    if isinstance(artifacts_cfg, Mapping):
+        run_root_value = artifacts_cfg.get("run_root")
+    run_root = Path(run_root_value) if run_root_value else log_file.parent
+    try:
+        summary_payload, summary_path = write_run_summary(
+            run_id=str(config.get("metadata", {}).get("name") or run_root.name),
+            run_dir=run_root,
+            log_path=log_file,
+            report_path=report_path,
+            trials_completed=trials_completed,
+            best_params=best_params,
+            best_metrics=best_metrics,
+            best_value=best_value,
+            pareto_front=pareto_records,
+            hypervolume=hypervolume,
+            llm_usage_path=llm_usage_path,
+            llm_trials=llm_trials_used,
+            seed=seed if isinstance(seed, int) else None,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort summary
+        print(f"[warning] Failed to write run summary: {exc}")
+
     return OptimizationResult(
         trials_completed=trials_completed,
         best_params=best_params,
@@ -305,6 +409,10 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         pareto_front=pareto_records,
         hypervolume=hypervolume,
         total_cost=total_cost,
+        llm_trials=llm_trials_used,
+        llm_accept_rate=llm_accept_rate,
+        summary_path=summary_path,
+        summary=summary_payload,
     )
 
 
@@ -338,15 +446,20 @@ def _execute_trial(
     if trial_failed:
         objective_values = _failure_penalty_values(study_directions)
 
-    tuple_values = tuple(objective_values)
-    if len(tuple_values) == 1:
-        for step, value in enumerate(tuple_values):
-            trial.report(value, step=step)
+            tuple_values = tuple(objective_values)
+            if len(tuple_values) == 1:
+                for step, value in enumerate(tuple_values):
+                    trial.report(value, step=step)
 
     trial.set_user_attr("metrics", dict(metrics))
     # Placeholders for future Pareto analytics.
-    trial.set_user_attr("dominates", False)
-    trial.set_user_attr("pareto_rank", None)
+            trial.set_user_attr("dominates", False)
+            trial.set_user_attr("pareto_rank", None)
+
+            if is_llm_trial:
+                llm_trials_used += 1
+                if llm_scheduler is not None:
+                    llm_scheduler.record_trial(True)
 
     return dict(metrics), tuple_values
 

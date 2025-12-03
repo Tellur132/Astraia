@@ -4,7 +4,7 @@
 
 ## セクション一覧
 - **metadata**: 実験名や説明。`runs list` などで表示される。
-- **seed**: 乱数シード。Optuna と LLM まわりで共有される。
+- **seed**: 乱数シード。Optuna・LLM・NumPy・量子ノイズシミュレーションで共有される。
 - **search**: Optuna の方向（`minimize`/`maximize`）、対象メトリクス、サンプラーなどの設定。
 - **stopping**: 停止条件 (`max_trials`, `max_time_minutes`, `no_improve_patience`)。
 - **search_space**: `float` / `int` / `categorical` など型別に探索範囲を定義。
@@ -13,7 +13,7 @@
 - **artifacts**: ルートディレクトリ (`run_root`)、ログファイル (`log_file`)、追加アーティファクトの出力パス。
 - **planner**: ルール/LLM バックエンド（`backend`）と固有設定パス (`config_path`)。
 - **llm**: `provider`（`openai` or `gemini`）、`model`、`usage_log` などの LLM 設定。
-- **llm_guidance**: LLM を使った候補生成の有効化フラグ、バッチサイズ、プロンプト設定。
+- **llm_guidance**: LLM を使った候補生成の有効化フラグ、バッチサイズ、プロンプト設定。`mode` で `full` / `init_only` / `mixed` を切替え、`init_trials`（初期トライアル数）や `mix_ratio`（混合率）、`max_llm_trials` で LLM を使う回数を制限できる。
 - **meta_search**: トライアル要約頻度、利用する LLM またはヒューリスティックの種類。Pareto summary の代表点や trade-off テキストもここで生成。
 - **llm_critic**: 実行後レポートを生成する LLM/ヒューリスティックの設定。
 

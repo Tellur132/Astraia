@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 import statistics
 from collections import OrderedDict
@@ -236,5 +237,223 @@ def _is_missing(value: Any) -> bool:
     return False
 
 
-__all__ = ["read_log_dataframe", "summarize_run_results"]
+__all__ = [
+    "read_log_dataframe",
+    "summarize_run_results",
+    "aggregate_llm_usage",
+    "write_run_summary",
+]
 
+
+def aggregate_llm_usage(path: Path | None) -> dict[str, int]:
+    """Aggregate LLM usage statistics from a CSV log.
+
+    Returns a dictionary with call counts and token totals. Missing files or
+    unparsable rows are treated as zero so that summary generation never fails
+    when LLM logging is absent.
+    """
+
+    if path is None or not path.exists():
+        return {
+            "llm_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    calls = 0
+    prompt = 0
+    completion = 0
+    total = 0
+
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            calls += 1
+            prompt += _safe_int(row.get("prompt_tokens"))
+            completion += _safe_int(row.get("completion_tokens"))
+            total_entry = _safe_int(row.get("total_tokens"))
+            if total_entry is not None:
+                total += total_entry
+            else:
+                total += _safe_int(row.get("prompt_tokens")) + _safe_int(
+                    row.get("completion_tokens")
+                )
+
+    return {
+        "llm_calls": calls,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }
+
+
+def write_run_summary(
+    *,
+    run_id: str,
+    run_dir: Path,
+    log_path: Path,
+    report_path: Path | None,
+    trials_completed: int,
+    best_params: Mapping[str, Any],
+    best_metrics: Mapping[str, Any],
+    best_value: Any,
+    pareto_front: Sequence[Mapping[str, Any]] | None,
+    hypervolume: float | None,
+    llm_usage_path: Path | None,
+    llm_trials: int | None,
+    seed: int | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Persist a compact, JSON-friendly summary for downstream comparisons."""
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _build_metadata_stub(
+        run_id=run_id,
+        run_dir=run_dir,
+        log_path=log_path,
+        report_path=report_path,
+        seed=seed,
+        config=config,
+    )
+
+    metric_overview = summarize_run_results(
+        metadata,
+        config=config,
+        allow_missing_log=True,
+    )
+    metrics_section = metric_overview.get("metrics", {})
+    best_energy_gap = _extract_best_metric(metrics_section, "energy_gap")
+    depth_best = _extract_best_metric(metrics_section, "depth")
+
+    llm_usage = aggregate_llm_usage(llm_usage_path)
+    llm_trial_count = llm_trials if llm_trials is not None else 0
+    llm_accept_rate = (
+        llm_trial_count / trials_completed if trials_completed > 0 else None
+    )
+
+    pareto_count = len(pareto_front or [])
+
+    summary: dict[str, Any] = {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "log_path": str(log_path),
+        "report_path": str(report_path) if report_path is not None else None,
+        "llm_usage_path": str(llm_usage_path) if llm_usage_path else None,
+        "trials_completed": trials_completed,
+        "best_value": best_value,
+        "best_params": _json_safe(best_params),
+        "best_metrics": _json_safe(best_metrics),
+        "pareto_count": pareto_count,
+        "hypervolume": hypervolume,
+        "best_energy_gap": best_energy_gap,
+        "depth_best": depth_best,
+        "llm_trials": llm_trial_count,
+        "llm_accept_rate": llm_accept_rate,
+        "llm_calls": llm_usage["llm_calls"],
+        "tokens": llm_usage["total_tokens"],
+        "tokens_prompt": llm_usage["prompt_tokens"],
+        "tokens_completion": llm_usage["completion_tokens"],
+        "metric_overview": metric_overview,
+        "seed": seed,
+    }
+
+    if pareto_front is not None:
+        summary["pareto_front"] = _json_safe(list(pareto_front))
+
+    summary_path = run_dir / "summary.json"
+    summary_path.write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    _maybe_attach_summary_artifact(run_dir, summary_path)
+
+    return summary, summary_path
+
+
+def _maybe_attach_summary_artifact(run_dir: Path, summary_path: Path) -> None:
+    meta_path = run_dir / "meta.json"
+    if not meta_path.exists():
+        return
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    artifacts = data.get("artifacts")
+    artifacts_map = dict(artifacts) if isinstance(artifacts, Mapping) else {}
+    artifacts_map["summary"] = str(summary_path)
+    data["artifacts"] = artifacts_map
+    meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _extract_best_metric(metrics_section: Mapping[str, Any], name: str) -> Any:
+    entry = metrics_section.get(name)
+    if entry is None and name.startswith("metric_"):
+        entry = metrics_section.get(name.replace("metric_", "", 1))
+    if entry is None and not name.startswith("metric_"):
+        entry = metrics_section.get(f"metric_{name}")
+    if isinstance(entry, Mapping):
+        return entry.get("best")
+    return None
+
+
+def _build_metadata_stub(
+    *,
+    run_id: str,
+    run_dir: Path,
+    log_path: Path,
+    report_path: Path | None,
+    seed: int | None,
+    config: Mapping[str, Any] | None,
+) -> RunMetadata:
+    artifacts = {"log": str(log_path)}
+    if report_path is not None:
+        artifacts["report"] = str(report_path)
+    metadata_payload = dict(config.get("metadata", {})) if isinstance(config, Mapping) else {}
+    report_payload = dict(config.get("report", {})) if isinstance(config, Mapping) else {}
+
+    return RunMetadata(
+        run_id=run_id,
+        run_dir=run_dir,
+        meta_path=run_dir / "meta.json",
+        created_at=None,
+        status=None,
+        status_updated_at=None,
+        status_payload={},
+        metadata=metadata_payload,
+        seed=seed if isinstance(seed, int) else None,
+        report=report_payload,
+        artifacts=artifacts,
+        source={},
+        raw={
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "artifacts": artifacts,
+            "metadata": metadata_payload,
+            "seed": seed,
+            "report": report_payload,
+        },
+    )
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return [_json_safe(item) for item in value]
+    try:
+        json.dumps(value)
+        return value
+    except Exception:  # noqa: BLE001 - fallback
+        return repr(value)
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
