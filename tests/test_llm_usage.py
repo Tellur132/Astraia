@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
-from astraia.llm_providers import LLMUsage, LLMUsageLogger, Prompt, PromptMessage
+from astraia.llm_providers import (
+    LLMResult,
+    LLMUsage,
+    LLMUsageLogger,
+    Prompt,
+    PromptMessage,
+    LLMExchangeLogger,
+)
 
 
 def test_prompt_to_chat_messages_includes_system() -> None:
@@ -43,3 +51,39 @@ def test_llm_usage_logger_writes_headers(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert rows[0]["provider"] == "openai"
     assert rows[0]["model"] == "gpt"
+
+
+def test_llm_exchange_logger_supports_events(tmp_path: Path) -> None:
+    log_path = tmp_path / "trace.jsonl"
+    logger = LLMExchangeLogger(log_path)
+    prompt = Prompt.from_text("hi")
+    result = LLMResult(content="ok", usage=None, raw_response=None)
+
+    logger.log(
+        prompt=prompt,
+        system="sys",
+        tool=None,
+        params={"temperature": 0.1},
+        result=result,
+        stage="guidance",
+        trace_id="trace-1",
+        latency_ms=12.5,
+        parse={"status": "ok"},
+        decision={"accepted": 1},
+    )
+    logger.log_event(
+        kind="proposal_enqueued",
+        stage="llm_guidance",
+        trace_id="trace-1",
+        data={"fingerprint": "abc"},
+    )
+
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert lines[0]["stage"] == "guidance"
+    assert lines[0]["trace_id"] == "trace-1"
+    assert lines[0]["parse"]["status"] == "ok"
+    assert lines[0]["decision"]["accepted"] == 1
+    assert lines[1]["kind"] == "proposal_enqueued"
+    assert lines[1]["event"]["fingerprint"] == "abc"
+    assert lines[1]["trace_id"] == "trace-1"

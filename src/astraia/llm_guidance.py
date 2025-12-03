@@ -7,8 +7,10 @@ import json
 import math
 import os
 import random
+import time
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 import warnings
+from uuid import uuid4
 
 from .llm_interfaces import LLMObjective, LLMRunContext
 from .llm_providers import (
@@ -95,6 +97,13 @@ def create_llm_provider(
         provider = _BudgetedProvider(provider, guard)
 
     return provider, usage_logger, trace_logger
+
+
+def fingerprint_proposal(proposal: Mapping[str, Any]) -> str:
+    """Stable hash for identifying proposals across the audit trail."""
+
+    canonical = json.dumps(dict(proposal), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class LLMBudgetGuard:
@@ -290,6 +299,7 @@ class LLMProposalGenerator:
         self._schema_cache: dict[int, Dict[str, Any]] = {}
         self._tool_cache: dict[int, ToolDefinition] = {}
         self._seen_hashes: set[str] = set()
+        self._proposal_traces: Dict[str, Dict[str, Any]] = {}
         self._context: LLMRunContext | None = None
         self._strategy_payload: Dict[str, Any] | None = None
         self._meta_directives: list[str] = []
@@ -297,6 +307,10 @@ class LLMProposalGenerator:
     @property
     def batch_size(self) -> int:
         return self._batch_size
+
+    @property
+    def trace_logger(self) -> LLMExchangeLogger | None:
+        return self._trace_logger
 
     def propose_batch(self, remaining: int | None = None) -> List[Dict[str, Any]]:
         if remaining is None:
@@ -308,13 +322,42 @@ class LLMProposalGenerator:
             count = min(self._batch_size, remaining)
 
         if self._provider is None:
-            return self._random_unique_batch(count)
+            trace_id = self._new_trace_id("no-provider")
+            proposals = self._random_unique_batch(count)
+            statuses = self._record_random_batch(
+                proposals, source="random_fallback", trace_id=trace_id
+            )
+            self._log_event(
+                kind="fallback_random",
+                trace_id=trace_id,
+                data={
+                    "reason": "provider_unavailable",
+                    "proposals": statuses,
+                    "expected": count,
+                },
+            )
+            return proposals
 
         cache_key = self._cache_key(count)
         cached = self._cache.get(cache_key)
         if cached is not None:
-            unique = self._ensure_unique_batch(cached, expected=count)
-            if unique is not None:
+            trace_id = self._new_trace_id("cache")
+            unique, statuses = self._prepare_unique_batch(
+                cached,
+                expected=count,
+                source="cache",
+                trace_id=trace_id,
+            )
+            self._log_event(
+                kind="cache_hit",
+                trace_id=trace_id,
+                data={
+                    "cache_key": cache_key,
+                    "proposals": statuses,
+                    "expected": count,
+                },
+            )
+            if unique:
                 return unique
 
         prompt = self._build_prompt(count)
@@ -326,6 +369,9 @@ class LLMProposalGenerator:
             params: Dict[str, Any] = {"temperature": temperature, "json_mode": False}
             result: LLMResult | None = None
             error: str | None = None
+            trace_id = self._new_trace_id("llm")
+            start = time.perf_counter()
+            latency_ms: float | None = None
             try:
                 result = self._provider.generate(
                     prompt,
@@ -334,7 +380,9 @@ class LLMProposalGenerator:
                     system=self._SYSTEM_PROMPT,
                     tool=tool,
                 )
+                latency_ms = (time.perf_counter() - start) * 1000.0
             except RuntimeError as exc:
+                latency_ms = (time.perf_counter() - start) * 1000.0
                 error = f"{exc.__class__.__name__}: {exc}"
                 self._log_exchange(
                     prompt=prompt,
@@ -343,9 +391,13 @@ class LLMProposalGenerator:
                     params=params,
                     result=None,
                     error=error,
+                    stage="llm_guidance",
+                    trace_id=trace_id,
+                    latency_ms=latency_ms,
                 )
                 break
             except Exception as exc:
+                latency_ms = (time.perf_counter() - start) * 1000.0
                 error = f"{exc.__class__.__name__}: {exc}"
                 self._log_exchange(
                     prompt=prompt,
@@ -354,28 +406,58 @@ class LLMProposalGenerator:
                     params=params,
                     result=None,
                     error=error,
+                    stage="llm_guidance",
+                    trace_id=trace_id,
+                    latency_ms=latency_ms,
                 )
                 raise
             self._log_usage(result)
+            proposals, parse_info = self._parse_and_validate_with_reason(
+                result, expected=count
+            )
+            decision_info: Dict[str, Any] = {"expected": count}
+            unique: List[Dict[str, Any]] | None = None
+            statuses: List[Dict[str, Any]] | None = None
+            if proposals is not None:
+                unique, statuses = self._prepare_unique_batch(
+                    proposals,
+                    expected=count,
+                    source="llm",
+                    trace_id=trace_id,
+                )
+                decision_info["proposals"] = statuses
+                decision_info["accepted"] = len(unique)
+                self._cache.set(cache_key, unique)
             self._log_exchange(
                 prompt=prompt,
                 system=self._SYSTEM_PROMPT,
                 tool=tool,
                 params=params,
                 result=result,
+                stage="llm_guidance",
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+                parse=parse_info,
+                decision=decision_info,
             )
-            proposals = self._parse_and_validate(result, expected=count)
-            if proposals is not None:
-                unique = self._ensure_unique_batch(proposals, expected=count)
-                if unique is not None:
-                    self._cache.set(cache_key, unique)
-                    return unique
+            if unique is not None:
+                return unique
             attempts += 1
             if attempts > self._max_retries:
                 break
             temperature = max(self._min_temperature, temperature * 0.5)
 
-        return self._random_unique_batch(count)
+        trace_id = self._new_trace_id("fallback")
+        proposals = self._random_unique_batch(count)
+        statuses = self._record_random_batch(
+            proposals, source="random_fallback", trace_id=trace_id
+        )
+        self._log_event(
+            kind="fallback_random",
+            trace_id=trace_id,
+            data={"reason": "max_retries_exhausted", "proposals": statuses, "expected": count},
+        )
+        return proposals
 
     def update_context(self, context: LLMRunContext | None) -> None:
         """Attach the latest shared optimization context for prompt construction."""
@@ -445,6 +527,11 @@ class LLMProposalGenerator:
         params: Mapping[str, Any],
         result: LLMResult | None,
         error: str | None = None,
+        stage: str | None = None,
+        trace_id: str | None = None,
+        latency_ms: float | None = None,
+        parse: Mapping[str, Any] | None = None,
+        decision: Mapping[str, Any] | None = None,
     ) -> None:
         if self._trace_logger is None:
             return
@@ -455,7 +542,165 @@ class LLMProposalGenerator:
             params=params,
             result=result,
             error=error,
+            stage=stage,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            parse=parse,
+            decision=decision,
         )
+
+    def _log_event(
+        self, *, kind: str, trace_id: str | None, data: Mapping[str, Any]
+    ) -> None:
+        if self._trace_logger is None:
+            return
+        self._trace_logger.log_event(
+            kind=kind,
+            stage="llm_guidance",
+            data=data,
+            trace_id=trace_id,
+        )
+
+    def describe_proposal(self, fingerprint: str) -> Dict[str, Any] | None:
+        """Return stored audit metadata for a proposal fingerprint."""
+
+        return self._proposal_traces.get(fingerprint)
+
+    def _new_trace_id(self, prefix: str) -> str:
+        return f"{prefix}-{uuid4().hex[:8]}"
+
+    def _prepare_unique_batch(
+        self,
+        proposals: Iterable[Mapping[str, Any]],
+        *,
+        expected: int,
+        source: str,
+        trace_id: str | None,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        unique: List[Dict[str, Any]] = []
+        statuses: List[Dict[str, Any]] = []
+        for proposal in proposals:
+            proposal_dict = dict(proposal)
+            fingerprint = self._hash_proposal(proposal_dict)
+            if self._register_proposal(proposal_dict):
+                unique.append(proposal_dict)
+                statuses.append(
+                    {
+                        "fingerprint": fingerprint,
+                        "status": "accepted",
+                        "source": source,
+                        "proposal": proposal_dict,
+                    }
+                )
+                self._register_proposal_trace(
+                    fingerprint, source=source, trace_id=trace_id
+                )
+            else:
+                statuses.append(
+                    {
+                        "fingerprint": fingerprint,
+                        "status": "duplicate",
+                        "source": source,
+                        "proposal": proposal_dict,
+                    }
+                )
+            if len(unique) >= expected:
+                break
+
+        needed = expected - len(unique)
+        if needed > 0:
+            filler = self._random_unique_batch(needed)
+            for proposal in filler:
+                fingerprint = self._hash_proposal(proposal)
+                statuses.append(
+                    {
+                        "fingerprint": fingerprint,
+                        "status": "fallback_random",
+                        "source": "fallback_random",
+                        "proposal": proposal,
+                    }
+                )
+                self._register_proposal_trace(
+                    fingerprint, source="fallback_random", trace_id=trace_id
+                )
+            unique.extend(filler)
+
+        return unique, statuses
+
+    def _record_random_batch(
+        self,
+        proposals: Iterable[Mapping[str, Any]],
+        *,
+        source: str,
+        trace_id: str | None,
+    ) -> List[Dict[str, Any]]:
+        statuses: List[Dict[str, Any]] = []
+        for proposal in proposals:
+            proposal_dict = dict(proposal)
+            fingerprint = self._hash_proposal(proposal_dict)
+            statuses.append(
+                {
+                    "fingerprint": fingerprint,
+                    "status": "accepted",
+                    "source": source,
+                    "proposal": proposal_dict,
+                }
+            )
+            self._register_proposal_trace(
+                fingerprint, source=source, trace_id=trace_id
+            )
+        return statuses
+
+    def _register_proposal_trace(
+        self, fingerprint: str, *, source: str, trace_id: str | None
+    ) -> None:
+        if fingerprint in self._proposal_traces:
+            return
+        self._proposal_traces[fingerprint] = {"source": source, "trace_id": trace_id}
+
+    def _parse_and_validate_with_reason(
+        self, result: LLMResult, *, expected: int
+    ) -> tuple[List[Dict[str, Any]] | None, Dict[str, Any]]:
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError as exc:
+            return None, {"status": "error", "reason": "json_error", "message": str(exc)}
+
+        if isinstance(payload, Mapping):
+            proposals = payload.get("proposals")
+        else:
+            proposals = payload
+
+        if not isinstance(proposals, Sequence):
+            return None, {"status": "error", "reason": "not_sequence"}
+        if len(proposals) != expected:
+            return None, {
+                "status": "error",
+                "reason": "wrong_length",
+                "observed": len(proposals),
+                "expected": expected,
+            }
+
+        validated: List[Dict[str, Any]] = []
+        try:
+            for item in proposals:
+                if not isinstance(item, Mapping):
+                    raise ValueError("proposal_not_mapping")
+                validated.append(self._validate_single(item))
+        except ValueError as exc:
+            return None, {
+                "status": "error",
+                "reason": "validation_failed",
+                "message": str(exc),
+            }
+
+        return validated, {"status": "ok", "count": len(validated)}
+
+    def _parse_and_validate(
+        self, result: LLMResult, *, expected: int
+    ) -> List[Dict[str, Any]] | None:
+        proposals, _ = self._parse_and_validate_with_reason(result, expected=expected)
+        return proposals
 
     def _cache_key(self, count: int) -> str:
         signature = json.dumps(self._search_space, sort_keys=True, ensure_ascii=False)
@@ -934,8 +1179,7 @@ class LLMProposalGenerator:
         return True
 
     def _hash_proposal(self, proposal: Mapping[str, Any]) -> str:
-        canonical = json.dumps(dict(proposal), ensure_ascii=False, sort_keys=True)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return fingerprint_proposal(proposal)
 
 
 _PROMPT_CACHE = PromptCache()
@@ -983,6 +1227,7 @@ def create_proposal_generator(
 __all__ = [
     "LLMProposalGenerator",
     "PromptCache",
+    "fingerprint_proposal",
     "create_llm_provider",
     "create_proposal_generator",
 ]

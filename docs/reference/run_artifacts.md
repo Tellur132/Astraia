@@ -9,6 +9,7 @@
 | `report.md` | ベスト試行、Pareto front、LLM クリティック、ハイパーボリュームの Markdown レポート。 |
 | `summary.json` | Run 全体のサマリ。`pareto_count` / `hypervolume` / `best_energy_gap` / `depth_best` / `llm_calls` / `tokens` / `llm_accept_rate` などの比較指標を集計。 |
 | `llm_usage.csv` | LLM 呼び出しログ（LLM 設定が存在する場合）。 |
+| `llm_messages.jsonl` | プロンプト/レスポンス/パース結果/採否/レイテンシを含む LLM 監査ログと、提案→enqueue→トライアル結果までのトレース。 |
 | `comparison_summary.json` | `runs compare` が利用する統計キャッシュ。`runs status --pareto-summary` で Pareto サマリを追記可能。 |
 | `meta.json` | `runs list` / `runs show` が参照するメタデータ。Git コミットやシード、アーティファクトの場所を記録。 |
 

@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import json
 import math
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -19,6 +20,7 @@ from typing import (
     Set,
     Tuple,
 )
+from uuid import uuid4
 
 import optuna
 
@@ -527,6 +529,9 @@ class MetaSearchAdjuster:
         params = {"temperature": 0.1, "json_mode": False}
         result: LLMResult | None = None
         error: str | None = None
+        trace_id = f"meta-{uuid4().hex[:8]}"
+        start = time.perf_counter()
+        latency_ms: float | None = None
         try:
             result = self._provider.generate(
                 prompt,
@@ -535,7 +540,9 @@ class MetaSearchAdjuster:
                 system=self._SYSTEM_PROMPT,
                 tool=tool,
             )
+            latency_ms = (time.perf_counter() - start) * 1000.0
         except Exception as exc:
+            latency_ms = (time.perf_counter() - start) * 1000.0
             error = f"{exc.__class__.__name__}: {exc}"
             self._log_exchange(
                 prompt=prompt,
@@ -544,18 +551,33 @@ class MetaSearchAdjuster:
                 params=params,
                 result=None,
                 error=error,
+                stage="meta_search",
+                trace_id=trace_id,
+                latency_ms=latency_ms,
             )
             return None
 
         self._log_usage(result)
+        parsed = self._parse_plan(result.content, trials_completed, settings)
+        parse_info: Dict[str, Any] = {
+            "status": "ok" if parsed is not None else "error",
+        }
         self._log_exchange(
             prompt=prompt,
             system=self._SYSTEM_PROMPT,
             tool=tool,
             params=params,
             result=result,
+            stage="meta_search",
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            parse=parse_info,
+            decision={
+                "trials_completed": trials_completed,
+                "settings": settings.__dict__,
+            },
         )
-        return self._parse_plan(result.content, trials_completed, settings)
+        return parsed
 
     def _heuristic_adjustment(
         self,
@@ -1003,6 +1025,11 @@ class MetaSearchAdjuster:
         params: Mapping[str, Any],
         result: LLMResult | None,
         error: str | None = None,
+        stage: str | None = None,
+        trace_id: str | None = None,
+        latency_ms: float | None = None,
+        parse: Mapping[str, Any] | None = None,
+        decision: Mapping[str, Any] | None = None,
     ) -> None:
         if self._trace_logger is None:
             return
@@ -1013,6 +1040,11 @@ class MetaSearchAdjuster:
             params=params,
             result=result,
             error=error,
+            stage=stage,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            parse=parse,
+            decision=decision,
         )
 
 

@@ -5,8 +5,10 @@ from dataclasses import dataclass, field
 import csv
 import json
 import math
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from uuid import uuid4
 
 from .llm_guidance import create_llm_provider
 from .llm_interfaces import (
@@ -141,6 +143,9 @@ def generate_llm_critique(
 
     result = None
     error: str | None = None
+    trace_id = f"critic-{uuid4().hex[:8]}"
+    start = time.perf_counter()
+    latency_ms: float | None = None
     try:
         result = provider.generate(
             prompt,
@@ -149,7 +154,9 @@ def generate_llm_critique(
             json_mode=False,
             tool=tool_def,
         )
+        latency_ms = (time.perf_counter() - start) * 1000.0
     except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000.0
         error = f"{exc.__class__.__name__}: {exc}"
         _log_trace(
             trace_logger,
@@ -159,11 +166,18 @@ def generate_llm_critique(
             params=params,
             result=None,
             error=error,
+            stage="llm_critic",
+            trace_id=trace_id,
+            latency_ms=latency_ms,
         )
         return fallback
 
     if usage_logger is not None:
         usage_logger.log(result.usage)
+    parsed = _parse_structured_critique(result.content, multi_objective=multi_objective)
+    parse_info = {
+        "status": "ok" if parsed is not None else "error",
+    }
     _log_trace(
         trace_logger,
         prompt=prompt,
@@ -171,9 +185,12 @@ def generate_llm_critique(
         tool=tool_def,
         params=params,
         result=result,
+        stage="llm_critic",
+        trace_id=trace_id,
+        latency_ms=latency_ms,
+        parse=parse_info,
     )
 
-    parsed = _parse_structured_critique(result.content, multi_objective=multi_objective)
     if parsed is None:
         return fallback
 
@@ -949,6 +966,10 @@ def _log_trace(
     params: Mapping[str, Any],
     result: Any,
     error: str | None = None,
+    stage: str | None = None,
+    trace_id: str | None = None,
+    latency_ms: float | None = None,
+    parse: Mapping[str, Any] | None = None,
 ) -> None:
     if logger is None:
         return
@@ -959,6 +980,10 @@ def _log_trace(
         params=params,
         result=result,
         error=error,
+        stage=stage,
+        trace_id=trace_id,
+        latency_ms=latency_ms,
+        parse=parse,
     )
 
 

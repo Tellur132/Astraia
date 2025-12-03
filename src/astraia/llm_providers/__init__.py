@@ -170,6 +170,13 @@ class LLMExchangeLogger:
         params: Mapping[str, Any] | None,
         result: LLMResult | None,
         error: str | None = None,
+        stage: str | None = None,
+        trace_id: str | None = None,
+        latency_ms: float | None = None,
+        parse: Mapping[str, Any] | None = None,
+        validation: Mapping[str, Any] | None = None,
+        decision: Mapping[str, Any] | None = None,
+        extras: Mapping[str, Any] | None = None,
         provider: str | None = None,
         model: str | None = None,
     ) -> None:
@@ -179,6 +186,8 @@ class LLMExchangeLogger:
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             "provider": provider or self._provider,
             "model": model or self._model,
+            "stage": stage,
+            "trace_id": trace_id,
             "request": {
                 "system": system,
                 "messages": [self._serialise_message(msg) for msg in prompt.messages],
@@ -186,6 +195,16 @@ class LLMExchangeLogger:
                 "params": self._clean_params(params),
             },
         }
+        if latency_ms is not None:
+            record["latency_ms"] = float(latency_ms)
+        if parse is not None:
+            record["parse"] = self._safe_value(parse)
+        if validation is not None:
+            record["validation"] = self._safe_value(validation)
+        if decision is not None:
+            record["decision"] = self._safe_value(decision)
+        if extras is not None:
+            record["extras"] = self._safe_value(extras)
         if result is not None:
             record["response"] = {
                 "content": result.content,
@@ -196,6 +215,30 @@ class LLMExchangeLogger:
         if error is not None:
             record["error"] = error
 
+        self._write_record(record)
+
+    def log_event(
+        self,
+        *,
+        kind: str,
+        stage: str | None = None,
+        data: Mapping[str, Any] | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        """Persist a non-call audit event to the JSONL log."""
+
+        record: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            "provider": self._provider,
+            "model": self._model,
+            "stage": stage,
+            "trace_id": trace_id,
+            "kind": kind,
+            "event": self._safe_value(data) if data is not None else None,
+        }
+        self._write_record(record)
+
+    def _write_record(self, record: Mapping[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False))

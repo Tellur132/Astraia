@@ -17,7 +17,7 @@ from optuna.distributions import BaseDistribution, FloatDistribution
 from optuna.trial import TrialState
 
 from .evaluators import BaseEvaluator, EvaluatorResult, MetricValue
-from .llm_guidance import create_proposal_generator
+from .llm_guidance import create_proposal_generator, fingerprint_proposal
 from .llm_critic import generate_llm_critique
 from .llm_interfaces import LLMObjective, LLMRepresentativePoint, LLMRunContext
 from .meta_search import (
@@ -140,7 +140,11 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         if proposal_generator is not None
         else None
     )
-    pending_proposals: deque[Dict[str, Any]] = deque()
+    llm_trace_logger = (
+        proposal_generator.trace_logger if proposal_generator is not None else None
+    )
+    pending_proposals: deque[tuple[Dict[str, Any], str]] = deque()
+    proposal_lineage: Dict[str, Dict[str, Any]] = {}
 
     planner_agent = create_planner_agent(
         config.get("planner"),
@@ -213,15 +217,45 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     batch = proposal_generator.propose_batch(remaining)
                     if not batch:
                         break
-                    pending_proposals.extend(batch)
+                    for proposal in batch:
+                        fingerprint = fingerprint_proposal(proposal)
+                        meta = proposal_generator.describe_proposal(fingerprint) or {}
+                        proposal_lineage[fingerprint] = meta
+                        pending_proposals.append((proposal, fingerprint))
+                        if llm_trace_logger is not None:
+                            llm_trace_logger.log_event(
+                                kind="proposal_buffered",
+                                stage="llm_guidance",
+                                trace_id=meta.get("trace_id"),
+                                data={
+                                    "fingerprint": fingerprint,
+                                    "source": meta.get("source"),
+                                },
+                            )
                 if pending_proposals:
-                    study.enqueue_trial(pending_proposals.popleft())
+                    proposal, fingerprint = pending_proposals.popleft()
+                    study.enqueue_trial(proposal)
+                    if llm_trace_logger is not None:
+                        meta = proposal_lineage.get(fingerprint, {})
+                        llm_trace_logger.log_event(
+                            kind="proposal_enqueued",
+                            stage="llm_guidance",
+                            trace_id=meta.get("trace_id"),
+                            data={
+                                "fingerprint": fingerprint,
+                                "proposal": proposal,
+                                "source": meta.get("source"),
+                            },
+                        )
             else:
                 pending_proposals.clear()
 
             trial = study.ask()
             fixed_params = getattr(trial, "_fixed_params", {}) or {}
             is_llm_trial = bool(fixed_params)
+            proposal_fingerprint = (
+                fingerprint_proposal(fixed_params) if is_llm_trial else None
+            )
             params = sample_params(trial, search_space)
             metrics, objective_values = _execute_trial(
                 trial,
@@ -238,6 +272,25 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
             else:
                 study.tell(trial, objective_values)
             trials_completed += 1
+            if is_llm_trial:
+                llm_trials_used += 1
+                if llm_scheduler is not None:
+                    llm_scheduler.record_trial(True)
+                if llm_trace_logger is not None:
+                    meta = proposal_lineage.get(proposal_fingerprint or "", {})
+                    llm_trace_logger.log_event(
+                        kind="llm_trial_result",
+                        stage="llm_guidance",
+                        trace_id=meta.get("trace_id"),
+                        data={
+                            "fingerprint": proposal_fingerprint,
+                            "trial": trial.number,
+                            "params": fixed_params,
+                            "metrics": metrics,
+                            "values": list(objective_values),
+                            "source": meta.get("source"),
+                        },
+                    )
 
             writer.log(trial.number, params, metrics)
 
@@ -445,21 +498,15 @@ def _execute_trial(
     trial_failed = _trial_failed(metrics) or contains_non_finite
     if trial_failed:
         objective_values = _failure_penalty_values(study_directions)
-
-            tuple_values = tuple(objective_values)
-            if len(tuple_values) == 1:
-                for step, value in enumerate(tuple_values):
-                    trial.report(value, step=step)
+    tuple_values = tuple(objective_values)
+    if trial_failed and len(tuple_values) == 1:
+        for step, value in enumerate(tuple_values):
+            trial.report(value, step=step)
 
     trial.set_user_attr("metrics", dict(metrics))
     # Placeholders for future Pareto analytics.
-            trial.set_user_attr("dominates", False)
-            trial.set_user_attr("pareto_rank", None)
-
-            if is_llm_trial:
-                llm_trials_used += 1
-                if llm_scheduler is not None:
-                    llm_scheduler.record_trial(True)
+    trial.set_user_attr("dominates", False)
+    trial.set_user_attr("pareto_rank", None)
 
     return dict(metrics), tuple_values
 

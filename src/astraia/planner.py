@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping
+from uuid import uuid4
 
 from .llm_guidance import create_llm_provider
 from .llm_interfaces import LLMRunContext
@@ -124,6 +126,9 @@ class LLMPlanner(BasePlanner):
         params = {"temperature": 0.2, "json_mode": False}
         result: LLMResult | None = None
         error: str | None = None
+        trace_id = f"planner-{uuid4().hex[:8]}"
+        start = time.perf_counter()
+        latency_ms: float | None = None
         try:
             result = self._provider.generate(
                 prompt,
@@ -131,7 +136,9 @@ class LLMPlanner(BasePlanner):
                 system=self._SYSTEM_PROMPT,
                 tool=tool,
             )
+            latency_ms = (time.perf_counter() - start) * 1000.0
         except RuntimeError as exc:
+            latency_ms = (time.perf_counter() - start) * 1000.0
             error = f"{exc.__class__.__name__}: {exc}"
             self._log_exchange(
                 prompt=prompt,
@@ -140,9 +147,13 @@ class LLMPlanner(BasePlanner):
                 params=params,
                 result=None,
                 error=error,
+                stage="planner",
+                trace_id=trace_id,
+                latency_ms=latency_ms,
             )
             return self._fallback.generate_strategy(context)
         except Exception as exc:
+            latency_ms = (time.perf_counter() - start) * 1000.0
             error = f"{exc.__class__.__name__}: {exc}"
             self._log_exchange(
                 prompt=prompt,
@@ -151,18 +162,26 @@ class LLMPlanner(BasePlanner):
                 params=params,
                 result=None,
                 error=error,
+                stage="planner",
+                trace_id=trace_id,
+                latency_ms=latency_ms,
             )
             raise
 
         self._log_usage(result)
+        strategy = self._parse_result(result)
+        parse_info = {"status": "ok" if strategy is not None else "error"}
         self._log_exchange(
             prompt=prompt,
             system=self._SYSTEM_PROMPT,
             tool=tool,
             params=params,
             result=result,
+            stage="planner",
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            parse=parse_info,
         )
-        strategy = self._parse_result(result)
         if strategy is None:
             return self._fallback.generate_strategy(context)
         return strategy
@@ -180,6 +199,10 @@ class LLMPlanner(BasePlanner):
         params: Mapping[str, Any],
         result: LLMResult | None,
         error: str | None = None,
+        stage: str | None = None,
+        trace_id: str | None = None,
+        latency_ms: float | None = None,
+        parse: Mapping[str, Any] | None = None,
     ) -> None:
         if self._trace_logger is None:
             return
@@ -190,6 +213,10 @@ class LLMPlanner(BasePlanner):
             params=params,
             result=result,
             error=error,
+            stage=stage,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            parse=parse,
         )
 
     def _build_prompt(self, context: LLMRunContext) -> Prompt:
