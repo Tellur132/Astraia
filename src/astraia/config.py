@@ -503,6 +503,11 @@ class LLMGuidanceConfig(BaseModel):
     min_temperature: float = 0.1
     init_trials: int = 5
     mix_ratio: float = 0.5
+    mix_ratio_floor: float = 0.1
+    mix_ratio_decay: float = 0.5
+    hv_guard_interval: int = 6
+    hv_guard_margin: float = 0.0
+    hv_guard_samples: int = 1200
     max_llm_trials: int | None = None
 
     @model_validator(mode="after")
@@ -542,8 +547,43 @@ class LLMGuidanceConfig(BaseModel):
             raise ValueError("llm_guidance.init_trials must be positive")
         if not (0.0 <= self.mix_ratio <= 1.0):
             raise ValueError("llm_guidance.mix_ratio must be between 0 and 1")
+        if not (0.0 <= self.mix_ratio_floor <= 1.0):
+            raise ValueError("llm_guidance.mix_ratio_floor must be between 0 and 1")
+        if not (0.0 < self.mix_ratio_decay <= 1.0):
+            raise ValueError("llm_guidance.mix_ratio_decay must be between 0 and 1")
+        if self.hv_guard_interval <= 0:
+            raise ValueError("llm_guidance.hv_guard_interval must be positive")
+        if self.hv_guard_samples <= 0:
+            raise ValueError("llm_guidance.hv_guard_samples must be positive")
         if self.max_llm_trials is not None and self.max_llm_trials <= 0:
             raise ValueError("llm_guidance.max_llm_trials must be positive when provided")
+        return self
+
+
+class DiversityGuardConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    param: str = "n_layers"
+    window: int = 8
+    min_unique: int = 2
+    stratified_fraction: float = 0.35
+    min_pareto_points: int = 3
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> "DiversityGuardConfig":
+        if not self.param or not self.param.strip():
+            raise ValueError("diversity_guard.param must be a non-empty string")
+        if self.window <= 0:
+            raise ValueError("diversity_guard.window must be positive")
+        if self.min_unique <= 0:
+            raise ValueError("diversity_guard.min_unique must be positive")
+        if self.stratified_fraction < 0 or self.stratified_fraction > 1:
+            raise ValueError(
+                "diversity_guard.stratified_fraction must be between 0 and 1"
+            )
+        if self.min_pareto_points <= 0:
+            raise ValueError("diversity_guard.min_pareto_points must be positive")
         return self
 
 
@@ -757,6 +797,7 @@ class OptimizationConfig(BaseModel):
     llm_guidance: LLMGuidanceConfig | None = None
     meta_search: MetaSearchConfig | None = None
     llm_critic: LLMCriticConfig | None = None
+    diversity_guard: DiversityGuardConfig | None = None
     search_space: Dict[str, Dict[str, Any]]
     evaluator: EvaluatorConfig
     report: ReportConfig
@@ -821,6 +862,7 @@ __all__ = [
     "ValidationError",
     "LLMConfig",
     "LLMGuidanceConfig",
+    "DiversityGuardConfig",
     "MetaSearchConfig",
     "LLMCriticConfig",
 ]

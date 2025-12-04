@@ -6,7 +6,7 @@ import importlib
 import math
 import random
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 import inspect
@@ -67,6 +67,11 @@ class LLMTrialScheduler:
         self._mode = mode if mode in {"full", "init_only", "mixed"} else "full"
         self._init_trials = int(cfg.get("init_trials", 5)) if cfg else 5
         self._mix_ratio = float(cfg.get("mix_ratio", 0.5)) if cfg else 0.5
+        self._mix_ratio_floor = (
+            float(cfg.get("mix_ratio_floor", 0.1)) if cfg else 0.1
+        )
+        self._mix_ratio_decay = float(cfg.get("mix_ratio_decay", 0.5)) if cfg else 0.5
+        self._current_mix_ratio = max(self._mix_ratio_floor, self._mix_ratio)
         max_trials = cfg.get("max_llm_trials") if cfg else None
         self._max_llm_trials = int(max_trials) if max_trials is not None else None
         self._rng = random.Random(seed)
@@ -76,22 +81,284 @@ class LLMTrialScheduler:
     def llm_trials(self) -> int:
         return self._llm_trials
 
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def current_mix_ratio(self) -> float:
+        return self._current_mix_ratio
+
     def allow_llm(self, trials_completed: int) -> bool:
         if self._max_llm_trials is not None and self._llm_trials >= self._max_llm_trials:
             return False
         if self._mode == "init_only":
             return trials_completed < self._init_trials
         if self._mode == "mixed":
-            if self._mix_ratio <= 0.0:
+            if self._current_mix_ratio <= 0.0:
                 return False
-            if self._mix_ratio >= 1.0:
+            if self._current_mix_ratio >= 1.0:
                 return True
-            return self._rng.random() < self._mix_ratio
+            return self._rng.random() < self._current_mix_ratio
         return self._mode != "off"
 
     def record_trial(self, used_llm: bool) -> None:
         if used_llm:
             self._llm_trials += 1
+
+    def update_mix_ratio(self, new_ratio: float) -> float:
+        """Clamp and update the live LLM mix ratio."""
+
+        clamped = min(1.0, max(self._mix_ratio_floor, float(new_ratio)))
+        self._current_mix_ratio = clamped
+        return self._current_mix_ratio
+
+    def decay_mix_ratio(self) -> float:
+        """Reduce the mix ratio using the configured decay factor."""
+
+        target = self._current_mix_ratio * self._mix_ratio_decay
+        return self.update_mix_ratio(target)
+
+
+class DiversityGuard:
+    """Enforce stratified coverage and minimum diversity for a structural parameter."""
+
+    def __init__(
+        self,
+        cfg: Mapping[str, Any] | None,
+        search_space: Mapping[str, Mapping[str, Any]],
+        *,
+        trial_budget: int,
+    ) -> None:
+        param_default = "n_layers"
+        param_name = str(cfg.get("param", param_default) if cfg else param_default).strip()
+        self.param_name = param_name or param_default
+        default_enabled = self.param_name in search_space
+        self.enabled = bool(cfg.get("enabled", default_enabled)) if cfg else default_enabled
+        self._values = self._enumerate_values(search_space.get(self.param_name))
+        self._trial_budget = max(1, int(trial_budget))
+        self._window = max(1, int(cfg.get("window", 8) if cfg else 8))
+        self._min_unique = max(1, int(cfg.get("min_unique", 2) if cfg else 2))
+        fraction_value = float(cfg.get("stratified_fraction", 0.35) if cfg else 0.35)
+        self._stratified_fraction = max(0.0, min(1.0, fraction_value))
+        min_pareto = int(cfg.get("min_pareto_points", 3) if cfg else 3)
+        self._min_pareto_points = min_pareto if min_pareto > 0 else None
+        self._target_total = (
+            min(trial_budget, int(math.ceil(trial_budget * self._stratified_fraction)))
+            if self._stratified_fraction > 0
+            else 0
+        )
+        self._recent: deque[int] = deque(maxlen=self._window)
+        self._pending = 0
+        self._completed = 0
+        self._enqueued = 0
+        self._rescue_pending = False
+        self._cycle_index = 0
+
+        if not self._values:
+            self.enabled = False
+
+    @property
+    def min_pareto_points(self) -> int | None:
+        return self._min_pareto_points if self.enabled else None
+
+    def plan_enqueues(self, trials_completed: int) -> list[tuple[Dict[str, Any], str]]:
+        """Return stratified or rescue payloads to enqueue."""
+
+        if not self.enabled or not self._values:
+            return []
+
+        plans: list[tuple[Dict[str, Any], str]] = []
+        if trials_completed + self._pending >= self._trial_budget:
+            return plans
+        target_so_far = self._target_for_progress(trials_completed + 1)
+        while (
+            self._target_total > 0
+            and self._completed + self._pending < target_so_far
+            and self._enqueued < self._target_total
+            and trials_completed + self._pending < self._trial_budget
+        ):
+            payload = {self.param_name: self._next_cycle_value()}
+            plans.append((payload, "stratified"))
+            self._pending += 1
+            self._enqueued += 1
+
+        rescue_value = self._rescue_value()
+        if rescue_value is not None and not self._rescue_pending:
+            if trials_completed + self._pending >= self._trial_budget:
+                return plans
+            plans.append(({self.param_name: rescue_value}, "diversity_guard"))
+            self._pending += 1
+            self._rescue_pending = True
+
+        return plans
+
+    def record_trial(self, params: Mapping[str, Any], source: str | None) -> None:
+        if not self.enabled:
+            return
+
+        if self.param_name in params:
+            try:
+                value = int(params[self.param_name])
+            except (TypeError, ValueError):
+                value = None
+            if value is not None:
+                self._recent.append(value)
+
+        if source in {"stratified", "diversity_guard"}:
+            if self._pending > 0:
+                self._pending -= 1
+            self._completed += 1
+            if source == "diversity_guard":
+                self._rescue_pending = False
+
+    def should_pause_llm(self) -> bool:
+        if not self.enabled or not self._values:
+            return False
+        if len(self._recent) < self._window:
+            return False
+        return len(set(self._recent)) < self._min_unique
+
+    def _target_for_progress(self, upcoming_trial: int) -> int:
+        if self._target_total <= 0:
+            return 0
+        target = math.ceil(upcoming_trial * self._stratified_fraction)
+        return min(self._target_total, target)
+
+    def _next_cycle_value(self) -> int:
+        value = self._values[self._cycle_index % len(self._values)]
+        self._cycle_index = (self._cycle_index + 1) % len(self._values)
+        return value
+
+    def _rescue_value(self) -> int | None:
+        if len(self._recent) < self._window:
+            return None
+        if len(set(self._recent)) >= self._min_unique:
+            return None
+        counts = Counter(self._recent)
+        missing = [value for value in self._values if value not in counts]
+        if missing:
+            return missing[0]
+        return min(self._values, key=lambda value: counts.get(value, 0))
+
+    @staticmethod
+    def _enumerate_values(spec: Mapping[str, Any] | None) -> list[int]:
+        if not isinstance(spec, Mapping):
+            return []
+        if str(spec.get("type", "")).lower() != "int":
+            return []
+        try:
+            low = int(spec.get("low", 0))
+            high = int(spec.get("high", low))
+            step = int(spec.get("step", 1) or 1)
+        except (TypeError, ValueError):
+            return []
+        if step <= 0 or high < low:
+            return []
+        values: list[int] = []
+        current = low
+        limit = 200
+        while current <= high and len(values) < limit:
+            values.append(current)
+            current += step
+        if values and values[-1] != high and len(values) < limit:
+            values.append(high)
+        return sorted(set(values))
+
+
+class HypervolumeMixGuard:
+    """Guardrail that backs off LLM usage when diversity metrics regress."""
+
+    def __init__(
+        self,
+        cfg: Mapping[str, Any] | None,
+        *,
+        enabled: bool,
+        min_pareto_points: int | None,
+        seed: int | None,
+    ) -> None:
+        self.enabled = enabled
+        self._interval = int(cfg.get("hv_guard_interval", 6) if cfg else 6)
+        self._margin = float(cfg.get("hv_guard_margin", 0.0) if cfg else 0.0)
+        self._samples = int(cfg.get("hv_guard_samples", 1200) if cfg else 1200)
+        decay_value = float(cfg.get("mix_ratio_decay", 0.5) if cfg else 0.5)
+        floor_value = float(cfg.get("mix_ratio_floor", 0.1) if cfg else 0.1)
+        self._decay = min(1.0, max(0.0, decay_value))
+        self._floor = min(1.0, max(0.0, floor_value))
+        self._last_checked = 0
+        self._seed = seed if isinstance(seed, int) else None
+        self._min_pareto_points = min_pareto_points
+
+        if self._interval <= 0:
+            self._interval = 6
+        if self._samples <= 0:
+            self._samples = 1200
+
+    def maybe_adjust(
+        self,
+        *,
+        study: optuna.study.Study,
+        direction_names: Sequence[str],
+        trials_completed: int,
+        current_mix_ratio: float | None,
+    ) -> tuple[float, str | None, float | None, float | None] | None:
+        if (
+            not self.enabled
+            or current_mix_ratio is None
+            or trials_completed - self._last_checked < self._interval
+        ):
+            return None
+
+        self._last_checked = trials_completed
+        objective_count = len(direction_names)
+        if objective_count < 2:
+            return None
+
+        all_points = _collect_objective_points(study, objective_count)
+        baseline_points = _collect_objective_points(
+            study,
+            objective_count,
+            exclude_sources={"llm"},
+        )
+        if not all_points:
+            return None
+
+        pareto_all = _pareto_front_from_points(all_points, direction_names)
+        pareto_baseline = _pareto_front_from_points(baseline_points, direction_names)
+
+        hv_all = _approximate_hypervolume(
+            pareto_points=pareto_all or all_points,
+            all_points=all_points,
+            direction_names=direction_names,
+            seed=self._seed,
+            samples=self._samples,
+        )
+        hv_baseline = _approximate_hypervolume(
+            pareto_points=pareto_baseline or baseline_points,
+            all_points=baseline_points,
+            direction_names=direction_names,
+            seed=self._seed,
+            samples=self._samples,
+        )
+
+        reason: str | None = None
+        if (
+            self._min_pareto_points is not None
+            and len(pareto_all) < int(self._min_pareto_points)
+        ):
+            reason = "pareto_collapse"
+
+        margin = max(self._margin, 0.0)
+        if hv_baseline is not None and hv_all is not None and hv_all + margin < hv_baseline:
+            reason = "hypervolume_drop"
+
+        if reason is None:
+            return None
+
+        new_ratio = max(self._floor, current_mix_ratio * self._decay)
+        if new_ratio < current_mix_ratio:
+            return new_ratio, reason, hv_all, hv_baseline
+        return None
 
 
 def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
@@ -151,6 +418,17 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         config.get("llm"),
         search_space=search_space,
     )
+    diversity_guard = DiversityGuard(
+        config.get("diversity_guard"),
+        search_space,
+        trial_budget=settings.trial_budget,
+    )
+    hypervolume_guard = HypervolumeMixGuard(
+        config.get("llm_guidance"),
+        enabled=len(direction_names) > 1,
+        min_pareto_points=diversity_guard.min_pareto_points,
+        seed=seed if isinstance(seed, int) else None,
+    )
 
     log_file = Path(config.get("artifacts", {}).get("log_file", "runs/log.csv"))
 
@@ -180,6 +458,7 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     ) as writer:
         start_ts = time.time()
         no_improve_counter = 0
+        llm_paused_for_diversity = False
 
         meta_adjuster = create_meta_search_adjuster(
             config.get("meta_search"),
@@ -199,7 +478,29 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     early_stop_reason = "max_time_minutes reached"
                     break
 
-            llm_allowed = proposal_generator is not None
+            diversity_plans = diversity_guard.plan_enqueues(trials_completed)
+            for payload, source in diversity_plans:
+                fingerprint = fingerprint_proposal(payload)
+                proposal_lineage[fingerprint] = {"source": source, "llm": False}
+                study.enqueue_trial(payload)
+                if llm_trace_logger is not None:
+                    llm_trace_logger.log_event(
+                        kind="proposal_enqueued",
+                        stage="diversity_guard",
+                        trace_id=None,
+                        data={
+                            "fingerprint": fingerprint,
+                            "proposal": payload,
+                            "source": source,
+                        },
+                    )
+
+            diversity_block = diversity_guard.should_pause_llm()
+            if diversity_block and proposal_generator is not None and not llm_paused_for_diversity:
+                print("[diversity] Pausing LLM proposals to restore structural coverage.")
+            llm_paused_for_diversity = diversity_block
+
+            llm_allowed = proposal_generator is not None and not diversity_block
             if llm_allowed and llm_scheduler is not None:
                 llm_allowed = llm_scheduler.allow_llm(trials_completed)
 
@@ -220,6 +521,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     for proposal in batch:
                         fingerprint = fingerprint_proposal(proposal)
                         meta = proposal_generator.describe_proposal(fingerprint) or {}
+                        if "llm" not in meta:
+                            meta["llm"] = True
                         proposal_lineage[fingerprint] = meta
                         pending_proposals.append((proposal, fingerprint))
                         if llm_trace_logger is not None:
@@ -252,10 +555,20 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
 
             trial = study.ask()
             fixed_params = getattr(trial, "_fixed_params", {}) or {}
-            is_llm_trial = bool(fixed_params)
             proposal_fingerprint = (
-                fingerprint_proposal(fixed_params) if is_llm_trial else None
+                fingerprint_proposal(fixed_params) if fixed_params else None
             )
+            lineage_meta = (
+                proposal_lineage.get(proposal_fingerprint or "", {})
+                if proposal_fingerprint
+                else {}
+            )
+            is_llm_trial = bool(lineage_meta.get("llm", bool(fixed_params)))
+            source_label = lineage_meta.get("source") if lineage_meta else None
+            if source_label is None:
+                source_label = "llm" if is_llm_trial else "sampler"
+            trial.set_user_attr("proposal_source", source_label)
+            trial.set_user_attr("llm_trial", bool(is_llm_trial))
             params = sample_params(trial, search_space)
             metrics, objective_values = _execute_trial(
                 trial,
@@ -293,6 +606,7 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     )
 
             writer.log(trial.number, params, metrics)
+            diversity_guard.record_trial(params, source_label)
 
             primary_improved = update_best(
                 primary_direction,
@@ -367,6 +681,33 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                 best_metrics=best_metrics,
                 trials_completed=trials_completed,
             )
+
+            if (
+                hypervolume_guard.enabled
+                and llm_scheduler is not None
+                and llm_scheduler.mode == "mixed"
+            ):
+                hv_adjustment = hypervolume_guard.maybe_adjust(
+                    study=study,
+                    direction_names=direction_names,
+                    trials_completed=trials_completed,
+                    current_mix_ratio=llm_scheduler.current_mix_ratio,
+                )
+                if hv_adjustment is not None:
+                    new_ratio, reason, hv_all, hv_baseline = hv_adjustment
+                    previous_ratio = llm_scheduler.current_mix_ratio
+                    updated_ratio = llm_scheduler.update_mix_ratio(new_ratio)
+                    if updated_ratio < previous_ratio:
+                        message = (
+                            f"[diversity] {reason or 'hv_guard'}: "
+                            f"LLM mix {previous_ratio:.2f}->{updated_ratio:.2f}"
+                        )
+                        if hv_all is not None and hv_baseline is not None:
+                            message += (
+                                f" (hv_all={_format_metric_value(hv_all)}, "
+                                f"hv_no_llm={_format_metric_value(hv_baseline)})"
+                            )
+                        print(message)
 
             if (
                 settings.patience is not None
@@ -978,16 +1319,49 @@ def _render_pareto_scatter(
 def _collect_objective_points(
     study: optuna.study.Study,
     objective_count: int,
+    *,
+    include_sources: set[str] | None = None,
+    exclude_sources: set[str] | None = None,
 ) -> List[List[float]]:
     points: List[List[float]] = []
     for trial in study.get_trials(deepcopy=False):
         if not trial.values or len(trial.values) < objective_count:
             continue
+        if include_sources is not None or exclude_sources is not None:
+            source = None
+            attrs = getattr(trial, "user_attrs", {})
+            if isinstance(attrs, Mapping):
+                source = attrs.get("proposal_source")
+            if include_sources is not None and source not in include_sources:
+                continue
+            if exclude_sources is not None and source in exclude_sources:
+                continue
         values = list(trial.values[:objective_count])
         if not all(math.isfinite(value) for value in values):
             continue
         points.append(values)
     return points
+
+
+def _pareto_front_from_points(
+    points: Sequence[Sequence[float]],
+    direction_names: Sequence[str],
+) -> List[List[float]]:
+    if not points:
+        return []
+    transformed = [_transform_objectives(point, direction_names) for point in points]
+    front: list[List[float]] = []
+    for idx, candidate in enumerate(transformed):
+        dominated = False
+        for jdx, other in enumerate(transformed):
+            if idx == jdx:
+                continue
+            if _dominates(other, candidate):
+                dominated = True
+                break
+        if not dominated:
+            front.append(points[idx])
+    return front
 
 
 def _approximate_hypervolume(
@@ -1141,6 +1515,14 @@ def _failure_penalty_values(
     if not penalties:
         penalties.append(float("inf"))
     return penalties
+
+
+def _dominates(candidate: Sequence[float], other: Sequence[float]) -> bool:
+    if len(candidate) != len(other):
+        return False
+    not_worse = all(c <= o for c, o in zip(candidate, other))
+    strictly_better = any(c < o for c, o in zip(candidate, other))
+    return not_worse and strictly_better
 
 
 def _transform_objectives(
