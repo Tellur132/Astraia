@@ -53,6 +53,8 @@ def make_generator(
     search_space: Mapping[str, Mapping[str, Any]] | None = None,
     batch_size: int = 2,
     trace_path: Path | None = None,
+    consistency_candidates: int = 1,
+    critic_enabled: bool = True,
 ) -> LLMProposalGenerator:
     provider = StubProvider(responses)
     usage_logger = LLMUsageLogger(tmp_path / "usage.csv")
@@ -65,6 +67,13 @@ def make_generator(
         base_temperature=base_temperature,
         min_temperature=min_temperature,
         max_retries=max_retries,
+        consistency_candidates=consistency_candidates,
+        temperature_jitter=0.2,
+        critic_enabled=critic_enabled,
+        critic_use_llm=False,
+        critic_accept_threshold=0.35,
+        critic_span_floor=0.1,
+        critic_diversity_floor=0.2,
         provider=provider,
         usage_logger=usage_logger,
         trace_logger=trace_logger,
@@ -96,7 +105,7 @@ def test_valid_response_is_cached(tmp_path: Path) -> None:
     assert second != payload["proposals"]
     assert len(second) == 2
     stub = getattr(generator, "_test_provider")
-    assert len(stub.temperatures) == 1
+    assert len(stub.temperatures) == 2
 
 
 def test_logs_prompt_and_response(tmp_path: Path) -> None:
@@ -199,3 +208,54 @@ def test_apply_search_space_overrides(tmp_path: Path) -> None:
     assert generator._search_space["theta"]["high"] == 0.25  # type: ignore[attr-defined]
     assert generator._search_space["backend"]["choices"] == ["a", "b"]  # type: ignore[attr-defined]
     assert any("theta" in entry for entry in updates)
+
+
+def test_self_consistency_prefers_diverse_batch(tmp_path: Path) -> None:
+    payload_bad = {
+        "proposals": [
+            {"theta": 0.0, "depth": 1, "backend": "a"},
+            {"theta": 0.0, "depth": 1, "backend": "a"},
+        ]
+    }
+    payload_mid = {
+        "proposals": [
+            {"theta": 0.05, "depth": 1, "backend": "a"},
+            {"theta": 0.06, "depth": 2, "backend": "b"},
+        ]
+    }
+    payload_best = {
+        "proposals": [
+            {"theta": -0.8, "depth": 1, "backend": "a"},
+            {"theta": 0.9, "depth": 3, "backend": "c"},
+        ]
+    }
+    generator = make_generator(
+        [result_from_payload(payload_bad), result_from_payload(payload_mid), result_from_payload(payload_best)],
+        tmp_path=tmp_path,
+        consistency_candidates=3,
+    )
+
+    proposals = generator.propose_batch(2)
+    assert proposals == payload_best["proposals"]
+
+    stub = getattr(generator, "_test_provider")
+    assert len(stub.temperatures) == 3
+
+
+def test_lightweight_critic_rejects_narrow_batch(tmp_path: Path) -> None:
+    payload = {
+        "proposals": [
+            {"theta": 0.0, "depth": 1, "backend": "a"},
+            {"theta": 0.01, "depth": 1, "backend": "a"},
+        ]
+    }
+    generator = make_generator(
+        [result_from_payload(payload)],
+        tmp_path=tmp_path,
+        consistency_candidates=1,
+    )
+
+    proposals = generator.propose_batch(2)
+    assert proposals != payload["proposals"]
+    for proposal in proposals:
+        assert -1.0 <= proposal["theta"] <= 1.0

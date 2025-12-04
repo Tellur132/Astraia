@@ -260,6 +260,19 @@ class PromptCache:
         self._storage[key] = [dict(item) for item in proposals]
 
 
+@dataclass
+class _CandidateBatch:
+    """Container for per-candidate proposals before selection."""
+
+    proposals: List[Dict[str, Any]]
+    statuses: List[Dict[str, Any]]
+    trace_id: str | None
+    source: str
+    temperature: float
+    parse_info: Dict[str, Any] | None = None
+    latency_ms: float | None = None
+
+
 class LLMProposalGenerator:
     """Generate parameter proposals via an LLM with strict validation."""
 
@@ -278,6 +291,13 @@ class LLMProposalGenerator:
         base_temperature: float,
         min_temperature: float,
         max_retries: int,
+        consistency_candidates: int,
+        temperature_jitter: float,
+        critic_enabled: bool,
+        critic_use_llm: bool,
+        critic_accept_threshold: float,
+        critic_span_floor: float,
+        critic_diversity_floor: float,
         provider: Any | None,
         usage_logger: LLMUsageLogger | None,
         trace_logger: LLMExchangeLogger | None,
@@ -291,6 +311,13 @@ class LLMProposalGenerator:
         self._base_temperature = base_temperature
         self._min_temperature = min_temperature
         self._max_retries = max_retries
+        self._consistency_candidates = max(1, consistency_candidates)
+        self._temperature_jitter = max(0.0, temperature_jitter)
+        self._critic_enabled = bool(critic_enabled)
+        self._critic_use_llm = bool(critic_use_llm)
+        self._critic_accept_threshold = max(0.0, min(1.0, critic_accept_threshold))
+        self._critic_span_floor = max(0.0, min(1.0, critic_span_floor))
+        self._critic_diversity_floor = max(0.0, min(1.0, critic_diversity_floor))
         self._provider = provider
         self._usage_logger = usage_logger
         self._trace_logger = trace_logger
@@ -339,6 +366,7 @@ class LLMProposalGenerator:
             return proposals
 
         cache_key = self._cache_key(count)
+        candidate_batches: list[_CandidateBatch] = []
         cached = self._cache.get(cache_key)
         if cached is not None:
             trace_id = self._new_trace_id("cache")
@@ -348,6 +376,11 @@ class LLMProposalGenerator:
                 source="cache",
                 trace_id=trace_id,
             )
+            critique = (
+                self._critique_batch(unique, statuses, expected=count)
+                if self._critic_enabled
+                else None
+            )
             self._log_event(
                 kind="cache_hit",
                 trace_id=trace_id,
@@ -355,109 +388,121 @@ class LLMProposalGenerator:
                     "cache_key": cache_key,
                     "proposals": statuses,
                     "expected": count,
+                    "critique": critique,
                 },
             )
-            if unique:
+            if not self._critic_enabled or (
+                critique is not None
+                and critique["score"] >= self._critic_accept_threshold
+                and not critique.get("issues")
+            ):
                 return unique
+            candidate_batches.append(
+                _CandidateBatch(
+                    proposals=unique,
+                    statuses=statuses,
+                    trace_id=trace_id,
+                    source="cache",
+                    temperature=self._base_temperature,
+                    parse_info={"status": "cache"},
+                    latency_ms=None,
+                )
+            )
 
         prompt = self._build_prompt(count)
-        temperature = self._base_temperature
-        attempts = 0
-
-        while attempts <= self._max_retries:
-            tool = self._proposal_tool(count)
-            params: Dict[str, Any] = {"temperature": temperature, "json_mode": False}
-            result: LLMResult | None = None
-            error: str | None = None
-            trace_id = self._new_trace_id("llm")
-            start = time.perf_counter()
-            latency_ms: float | None = None
-            try:
-                result = self._provider.generate(
-                    prompt,
-                    temperature=temperature,
-                    json_mode=False,
-                    system=self._SYSTEM_PROMPT,
-                    tool=tool,
-                )
-                latency_ms = (time.perf_counter() - start) * 1000.0
-            except RuntimeError as exc:
-                latency_ms = (time.perf_counter() - start) * 1000.0
-                error = f"{exc.__class__.__name__}: {exc}"
-                self._log_exchange(
-                    prompt=prompt,
-                    system=self._SYSTEM_PROMPT,
-                    tool=tool,
-                    params=params,
-                    result=None,
-                    error=error,
-                    stage="llm_guidance",
-                    trace_id=trace_id,
-                    latency_ms=latency_ms,
-                )
-                break
-            except Exception as exc:
-                latency_ms = (time.perf_counter() - start) * 1000.0
-                error = f"{exc.__class__.__name__}: {exc}"
-                self._log_exchange(
-                    prompt=prompt,
-                    system=self._SYSTEM_PROMPT,
-                    tool=tool,
-                    params=params,
-                    result=None,
-                    error=error,
-                    stage="llm_guidance",
-                    trace_id=trace_id,
-                    latency_ms=latency_ms,
-                )
-                raise
-            self._log_usage(result)
-            proposals, parse_info = self._parse_and_validate_with_reason(
-                result, expected=count
+        for temperature in self._temperature_candidates():
+            candidate = self._generate_candidate(
+                prompt, count=count, initial_temperature=temperature
             )
-            decision_info: Dict[str, Any] = {"expected": count}
-            unique: List[Dict[str, Any]] | None = None
-            statuses: List[Dict[str, Any]] | None = None
-            if proposals is not None:
-                unique, statuses = self._prepare_unique_batch(
-                    proposals,
-                    expected=count,
-                    source="llm",
-                    trace_id=trace_id,
-                )
-                decision_info["proposals"] = statuses
-                decision_info["accepted"] = len(unique)
-                self._cache.set(cache_key, unique)
-            self._log_exchange(
-                prompt=prompt,
-                system=self._SYSTEM_PROMPT,
-                tool=tool,
-                params=params,
-                result=result,
-                stage="llm_guidance",
+            candidate_batches.append(candidate)
+
+        if not candidate_batches:
+            trace_id = self._new_trace_id("fallback")
+            proposals = self._random_unique_batch(count)
+            statuses = self._record_random_batch(
+                proposals, source="random_fallback", trace_id=trace_id
+            )
+            self._log_event(
+                kind="fallback_random",
                 trace_id=trace_id,
-                latency_ms=latency_ms,
-                parse=parse_info,
-                decision=decision_info,
+                data={"reason": "no_candidates", "proposals": statuses, "expected": count},
             )
-            if unique is not None:
-                return unique
-            attempts += 1
-            if attempts > self._max_retries:
-                break
-            temperature = max(self._min_temperature, temperature * 0.5)
+            return proposals
 
-        trace_id = self._new_trace_id("fallback")
-        proposals = self._random_unique_batch(count)
-        statuses = self._record_random_batch(
-            proposals, source="random_fallback", trace_id=trace_id
+        scored: list[dict[str, Any]] = []
+        for idx, candidate in enumerate(candidate_batches):
+            critique = (
+                self._critique_batch(candidate.proposals, candidate.statuses, expected=count)
+                if self._critic_enabled
+                else {
+                    "score": 1.0,
+                    "issues": [],
+                    "diversity": 1.0,
+                    "span_ratio": 1.0,
+                    "edge_bias": 0.0,
+                    "fallback_fraction": 0.0,
+                    "duplicate_fraction": 0.0,
+                    "issue_count": 0,
+                }
+            )
+            scored.append(
+                {
+                    "candidate": candidate,
+                    "critique": critique,
+                    "rank": idx,
+                }
+            )
+
+        scored.sort(
+            key=lambda entry: (
+                -entry["critique"]["score"],
+                entry["critique"].get("issue_count", 0),
+                entry["rank"],
+            )
         )
+
+        selection = self._select_candidate(scored, expected=count)
+        if selection is None:
+            trace_id = self._new_trace_id("fallback")
+            proposals = self._random_unique_batch(count)
+            statuses = self._record_random_batch(
+                proposals, source="random_fallback", trace_id=trace_id
+            )
+            self._log_event(
+                kind="fallback_random",
+                trace_id=trace_id,
+                data={"reason": "critic_rejection", "proposals": statuses, "expected": count},
+            )
+            return proposals
+
+        selected = selection["candidate"]
+        selection_meta = {
+            "trace_id": selected.trace_id,
+            "source": selected.source,
+            "temperature": selected.temperature,
+            "score": selection["critique"]["score"],
+            "issues": selection["critique"].get("issues", []),
+        }
+        self._cache.set(cache_key, selected.proposals)
         self._log_event(
-            kind="fallback_random",
-            trace_id=trace_id,
-            data={"reason": "max_retries_exhausted", "proposals": statuses, "expected": count},
+            kind="candidate_selected",
+            trace_id=selected.trace_id,
+            data={
+                "cache_key": cache_key,
+                "selected": selection_meta,
+                "candidates": [
+                    {
+                        "source": entry["candidate"].source,
+                        "trace_id": entry["candidate"].trace_id,
+                        "temperature": entry["candidate"].temperature,
+                        "score": entry["critique"]["score"],
+                        "issues": entry["critique"].get("issues", []),
+                    }
+                    for entry in scored
+                ],
+            },
         )
-        return proposals
+        return selected.proposals
 
     def update_context(self, context: LLMRunContext | None) -> None:
         """Attach the latest shared optimization context for prompt construction."""
@@ -569,6 +614,148 @@ class LLMProposalGenerator:
     def _new_trace_id(self, prefix: str) -> str:
         return f"{prefix}-{uuid4().hex[:8]}"
 
+    def _temperature_candidates(self) -> List[float]:
+        if self._consistency_candidates <= 1:
+            return [self._base_temperature]
+        span = self._temperature_jitter
+        count = self._consistency_candidates
+        temperatures: list[float] = []
+        for idx in range(count):
+            if count == 1:
+                offset = 0.0
+            else:
+                offset = span * ((2 * idx / (count - 1)) - 1.0)
+            temperature = max(self._min_temperature, self._base_temperature + offset)
+            temperatures.append(temperature)
+        return temperatures
+
+    def _generate_candidate(
+        self, prompt: Prompt, *, count: int, initial_temperature: float
+    ) -> _CandidateBatch:
+        tool = self._proposal_tool(count)
+        temperature = initial_temperature
+        attempts = 0
+
+        while attempts <= self._max_retries:
+            params: Dict[str, Any] = {"temperature": temperature, "json_mode": False}
+            result: LLMResult | None = None
+            error: str | None = None
+            trace_id = self._new_trace_id("llm")
+            start = time.perf_counter()
+            latency_ms: float | None = None
+            try:
+                result = self._provider.generate(
+                    prompt,
+                    temperature=temperature,
+                    json_mode=False,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                )
+                latency_ms = (time.perf_counter() - start) * 1000.0
+            except RuntimeError as exc:
+                latency_ms = (time.perf_counter() - start) * 1000.0
+                error = f"{exc.__class__.__name__}: {exc}"
+                self._log_exchange(
+                    prompt=prompt,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                    params=params,
+                    result=None,
+                    error=error,
+                    stage="llm_guidance",
+                    trace_id=trace_id,
+                    latency_ms=latency_ms,
+                )
+                break
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - start) * 1000.0
+                error = f"{exc.__class__.__name__}: {exc}"
+                self._log_exchange(
+                    prompt=prompt,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                    params=params,
+                    result=None,
+                    error=error,
+                    stage="llm_guidance",
+                    trace_id=trace_id,
+                    latency_ms=latency_ms,
+                )
+                raise
+
+            self._log_usage(result)
+            proposals, parse_info = self._parse_and_validate_with_reason(
+                result, expected=count
+            )
+            decision_info: Dict[str, Any] = {"expected": count, "temperature": temperature}
+            if proposals is not None:
+                unique, statuses = self._prepare_unique_batch(
+                    proposals,
+                    expected=count,
+                    source="llm",
+                    trace_id=trace_id,
+                )
+                decision_info["proposals"] = statuses
+                decision_info["accepted"] = len(unique)
+                self._log_exchange(
+                    prompt=prompt,
+                    system=self._SYSTEM_PROMPT,
+                    tool=tool,
+                    params=params,
+                    result=result,
+                    stage="llm_guidance",
+                    trace_id=trace_id,
+                    latency_ms=latency_ms,
+                    parse=parse_info,
+                    decision=decision_info,
+                )
+                return _CandidateBatch(
+                    proposals=unique,
+                    statuses=statuses,
+                    trace_id=trace_id,
+                    source="llm",
+                    temperature=temperature,
+                    parse_info=parse_info,
+                    latency_ms=latency_ms,
+                )
+
+            self._log_exchange(
+                prompt=prompt,
+                system=self._SYSTEM_PROMPT,
+                tool=tool,
+                params=params,
+                result=result,
+                stage="llm_guidance",
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+                parse=parse_info,
+                decision=decision_info,
+            )
+
+            attempts += 1
+            if attempts > self._max_retries:
+                break
+            temperature = max(self._min_temperature, temperature * 0.5)
+
+        trace_id = self._new_trace_id("fallback")
+        proposals = self._random_unique_batch(count)
+        statuses = self._record_random_batch(
+            proposals, source="random_fallback", trace_id=trace_id
+        )
+        self._log_event(
+            kind="fallback_random",
+            trace_id=trace_id,
+            data={"reason": "max_retries_exhausted", "proposals": statuses, "expected": count},
+        )
+        return _CandidateBatch(
+            proposals=proposals,
+            statuses=statuses,
+            trace_id=trace_id,
+            source="random_fallback",
+            temperature=temperature,
+            parse_info={"status": "fallback"},
+        )
+
     def _prepare_unique_batch(
         self,
         proposals: Iterable[Mapping[str, Any]],
@@ -650,6 +837,286 @@ class LLMProposalGenerator:
                 fingerprint, source=source, trace_id=trace_id
             )
         return statuses
+
+    def _critique_batch(
+        self,
+        proposals: List[Dict[str, Any]],
+        statuses: List[Dict[str, Any]],
+        *,
+        expected: int,
+    ) -> Dict[str, Any]:
+        fallback_count = sum(
+            1
+            for entry in statuses
+            if entry.get("status") == "fallback_random"
+            or entry.get("source") == "random_fallback"
+        )
+        duplicate_count = sum(
+            1 for entry in statuses if entry.get("status") == "duplicate"
+        )
+        metrics = self._summarise_proposals(proposals)
+        fallback_penalty = (fallback_count / max(1, expected)) * 0.4
+        duplicate_penalty = (duplicate_count / max(1, expected)) * 0.25
+        edge_penalty = max(0.0, metrics["edge_bias"] - 0.85) * 0.5
+        score = (
+            (metrics["diversity"] + metrics["span_ratio"]) * 0.5
+            - fallback_penalty
+            - duplicate_penalty
+            - edge_penalty
+        )
+        score = max(0.0, min(1.0, score))
+
+        issues: list[str] = []
+        if metrics["diversity"] < self._critic_diversity_floor:
+            issues.append("low_diversity")
+        if metrics["span_ratio"] < self._critic_span_floor:
+            issues.append("narrow_range")
+        if metrics["edge_bias"] > 0.85:
+            issues.append("objective_sign_maybe_wrong")
+        if fallback_count > 0:
+            issues.append("fallback_fill")
+        if duplicate_count > 0:
+            issues.append("duplicates_trimmed")
+
+        metrics.update(
+            {
+                "score": score,
+                "issues": issues,
+                "fallback_fraction": fallback_count / max(1, expected),
+                "duplicate_fraction": duplicate_count / max(1, expected),
+                "issue_count": len(issues),
+            }
+        )
+        return metrics
+
+    def _summarise_proposals(
+        self, proposals: List[Dict[str, Any]]
+    ) -> Dict[str, float]:
+        if not proposals:
+            return {"diversity": 0.0, "span_ratio": 0.0, "edge_bias": 0.0}
+
+        diversity_scores: list[float] = []
+        span_ratios: list[float] = []
+        edge_biases: list[float] = []
+
+        for name, spec in self._search_space.items():
+            values = [proposal.get(name) for proposal in proposals if name in proposal]
+            if not values:
+                continue
+            p_type = spec.get("type")
+            if p_type in {"float", "int"}:
+                try:
+                    numeric_values = [float(value) for value in values]
+                except (TypeError, ValueError):
+                    continue
+                low = float(spec.get("low"))
+                high = float(spec.get("high"))
+                full_range = max(high - low, 1e-9)
+                if len(numeric_values) > 1:
+                    spread = max(numeric_values) - min(numeric_values)
+                    span = min(1.0, max(0.0, spread / full_range))
+                    span_ratios.append(span)
+                    diversity_scores.append(span)
+                    lower_edge = sum(
+                        1
+                        for value in numeric_values
+                        if value <= low + 0.05 * full_range
+                    )
+                    upper_edge = sum(
+                        1
+                        for value in numeric_values
+                        if value >= high - 0.05 * full_range
+                    )
+                    edge_bias = max(lower_edge, upper_edge) / len(numeric_values)
+                    edge_biases.append(edge_bias)
+                else:
+                    # Avoid penalizing single-item batches; treat as neutral.
+                    diversity_scores.append(1.0)
+                    span_ratios.append(1.0)
+            elif p_type == "categorical":
+                unique_ratio = len(set(values)) / len(values)
+                diversity_scores.append(unique_ratio)
+            elif p_type == "llm_only":
+                unique_ratio = len(set(map(str, values))) / len(values)
+                diversity_scores.append(unique_ratio)
+
+        diversity = (
+            sum(diversity_scores) / len(diversity_scores) if diversity_scores else 1.0
+        )
+        span_ratio = min(span_ratios) if span_ratios else 1.0
+        edge_bias = max(edge_biases) if edge_biases else 0.0
+        return {
+            "diversity": diversity,
+            "span_ratio": span_ratio,
+            "edge_bias": edge_bias,
+        }
+
+    def _select_candidate(
+        self, scored: List[Dict[str, Any]], *, expected: int
+    ) -> Dict[str, Any] | None:
+        if not scored:
+            return None
+
+        viable = [
+            entry
+            for entry in scored
+            if not self._critic_enabled
+            or entry["critique"]["score"] >= self._critic_accept_threshold
+        ]
+        choice = viable[0] if viable else scored[0]
+
+        if (
+            self._critic_use_llm
+            and self._provider is not None
+            and (choice["critique"]["issues"] or choice["critique"]["score"] < self._critic_accept_threshold)
+        ):
+            runner_up = scored[1] if len(scored) > 1 else None
+            decision, parse_info = self._run_llm_critic(choice, runner_up, expected=expected)
+            if decision == "reject":
+                if runner_up is not None:
+                    choice = runner_up
+                else:
+                    return None
+            if self._trace_logger is not None and parse_info is not None:
+                self._trace_logger.log_event(
+                    kind="lightweight_critic",
+                    stage="llm_guidance",
+                    data={
+                        "decision": decision,
+                        "primary": {
+                            "score": choice["critique"]["score"],
+                            "issues": choice["critique"].get("issues", []),
+                        },
+                    },
+                    trace_id=choice["candidate"].trace_id,
+                )
+
+        if (
+            self._critic_enabled
+            and choice["critique"]["score"] < self._critic_accept_threshold
+        ):
+            # If all candidates scored poorly, reject and fall back.
+            return None
+        return choice
+
+    def _run_llm_critic(
+        self,
+        primary: Dict[str, Any],
+        runner_up: Dict[str, Any] | None,
+        *,
+        expected: int,
+    ) -> tuple[str, Dict[str, Any] | None]:
+        prompt = self._build_critic_prompt(primary, runner_up, expected=expected)
+        schema = {
+            "type": "object",
+            "properties": {
+                "decision": {"enum": ["accept", "reject"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["decision"],
+            "additionalProperties": False,
+        }
+        tool = ToolDefinition(
+            name="decide_acceptance",
+            description="Decide whether to accept the current best candidate batch.",
+            parameters=schema,
+        )
+        params = {"temperature": 0.2, "json_mode": False}
+        trace_id = self._new_trace_id("critic")
+        start = time.perf_counter()
+        latency_ms: float | None = None
+        result: LLMResult | None = None
+        error: str | None = None
+        system_prompt = (
+            "You are a lightweight guardrail that only decides to accept or "
+            "reject proposal batches based on heuristic signals."
+        )
+        try:
+            result = self._provider.generate(
+                prompt,
+                temperature=0.2,
+                system=system_prompt,
+                tool=tool,
+            )
+            latency_ms = (time.perf_counter() - start) * 1000.0
+        except Exception as exc:  # pragma: no cover - defensive
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            error = f"{exc.__class__.__name__}: {exc}"
+            self._log_exchange(
+                prompt=prompt,
+                system=system_prompt,
+                tool=tool,
+                params=params,
+                result=None,
+                error=error,
+                stage="llm_guidance_critic",
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+            )
+            return "accept", None
+
+        self._log_usage(result)
+        decision_payload, parse_info = self._parse_critic_decision(result)
+        decision = decision_payload.get("decision", "accept") if decision_payload else "accept"
+        self._log_exchange(
+            prompt=prompt,
+            system=system_prompt,
+            tool=tool,
+            params=params,
+            result=result,
+            stage="llm_guidance_critic",
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            parse=parse_info,
+        )
+        return decision, parse_info
+
+    def _parse_critic_decision(
+        self, result: LLMResult
+    ) -> tuple[Dict[str, Any] | None, Dict[str, Any]]:
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError as exc:
+            return None, {"status": "error", "reason": "json_error", "message": str(exc)}
+        if not isinstance(payload, Mapping):
+            return None, {"status": "error", "reason": "not_mapping"}
+        decision = str(payload.get("decision", "accept")).lower()
+        if decision not in {"accept", "reject"}:
+            return None, {"status": "error", "reason": "bad_decision"}
+        cleaned = {"decision": decision}
+        reason = payload.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            cleaned["reason"] = reason.strip()
+        return cleaned, {"status": "ok"}
+
+    def _build_critic_prompt(
+        self,
+        primary: Dict[str, Any],
+        runner_up: Dict[str, Any] | None,
+        *,
+        expected: int,
+    ) -> Prompt:
+        p = primary["critique"]
+        candidate = primary["candidate"]
+        lines = [
+            "Heuristic scores for candidate batches (higher is better).",
+            f"Primary: score={p['score']:.3f}, issues={p.get('issues', [])}, source={candidate.source}, temperature={candidate.temperature}",
+            f"span_ratio={p.get('span_ratio'):.3f}, diversity={p.get('diversity'):.3f}, edge_bias={p.get('edge_bias'):.3f}",
+            f"fallback_fraction={p.get('fallback_fraction'):.3f}, duplicate_fraction={p.get('duplicate_fraction'):.3f}",
+        ]
+        if runner_up is not None:
+            r = runner_up["critique"]
+            lines.append(
+                f"Runner-up: score={r['score']:.3f}, issues={r.get('issues', [])}, source={runner_up['candidate'].source}"
+            )
+        lines.extend(
+            [
+                "",
+                "Reject if the primary batch looks narrow (span_ratio below threshold), boundary-biased, or dominated by fallbacks.",
+                "Otherwise accept. Respond only with JSON.",
+            ]
+        )
+        return Prompt(messages=[PromptMessage(role="user", content="\n".join(lines))])
 
     def _register_proposal_trace(
         self, fingerprint: str, *, source: str, trace_id: str | None
@@ -1204,6 +1671,13 @@ def create_proposal_generator(
     max_retries = int(guidance_cfg.get("max_retries", 2))
     base_temperature = float(guidance_cfg.get("base_temperature", 0.7))
     min_temperature = float(guidance_cfg.get("min_temperature", 0.1))
+    consistency_candidates = int(guidance_cfg.get("consistency_candidates", 3))
+    temperature_jitter = float(guidance_cfg.get("consistency_temperature_jitter", 0.2))
+    critic_enabled = bool(guidance_cfg.get("critic_enabled", True))
+    critic_use_llm = bool(guidance_cfg.get("critic_use_llm", False))
+    critic_accept_threshold = float(guidance_cfg.get("critic_accept_threshold", 0.35))
+    critic_span_floor = float(guidance_cfg.get("critic_span_floor", 0.1))
+    critic_diversity_floor = float(guidance_cfg.get("critic_diversity_floor", 0.2))
 
     effective_llm_cfg = preferred_llm_cfg or llm_cfg
     provider, usage_logger, trace_logger = create_llm_provider(effective_llm_cfg)
@@ -1216,6 +1690,13 @@ def create_proposal_generator(
         base_temperature=base_temperature,
         min_temperature=min_temperature,
         max_retries=max_retries,
+        consistency_candidates=consistency_candidates,
+        temperature_jitter=temperature_jitter,
+        critic_enabled=critic_enabled,
+        critic_use_llm=critic_use_llm,
+        critic_accept_threshold=critic_accept_threshold,
+        critic_span_floor=critic_span_floor,
+        critic_diversity_floor=critic_diversity_floor,
         provider=provider,
         usage_logger=usage_logger,
         trace_logger=trace_logger,

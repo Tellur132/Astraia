@@ -501,6 +501,13 @@ class LLMGuidanceConfig(BaseModel):
     max_retries: int = 2
     base_temperature: float = 0.7
     min_temperature: float = 0.1
+    consistency_candidates: int = 3
+    consistency_temperature_jitter: float = 0.2
+    critic_enabled: bool = True
+    critic_use_llm: bool = False
+    critic_accept_threshold: float = 0.35
+    critic_span_floor: float = 0.1
+    critic_diversity_floor: float = 0.2
     init_trials: int = 5
     mix_ratio: float = 0.5
     mix_ratio_floor: float = 0.1
@@ -543,6 +550,16 @@ class LLMGuidanceConfig(BaseModel):
             raise ValueError(
                 "llm_guidance.min_temperature must be less than or equal to base_temperature"
             )
+        if self.consistency_candidates <= 0:
+            raise ValueError("llm_guidance.consistency_candidates must be positive")
+        if self.consistency_temperature_jitter < 0:
+            raise ValueError("llm_guidance.consistency_temperature_jitter must be non-negative")
+        if not (0.0 <= self.critic_accept_threshold <= 1.0):
+            raise ValueError("llm_guidance.critic_accept_threshold must be between 0 and 1")
+        if not (0.0 <= self.critic_span_floor <= 1.0):
+            raise ValueError("llm_guidance.critic_span_floor must be between 0 and 1")
+        if not (0.0 <= self.critic_diversity_floor <= 1.0):
+            raise ValueError("llm_guidance.critic_diversity_floor must be between 0 and 1")
         if self.init_trials <= 0:
             raise ValueError("llm_guidance.init_trials must be positive")
         if not (0.0 <= self.mix_ratio <= 1.0):
