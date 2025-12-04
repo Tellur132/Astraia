@@ -7,6 +7,7 @@ Astraia のドキュメントを GitHub Pages（`docs/` 直下）でまとめた
 ### How-to（具体的な手順）
 - [セットアップとインストール](howto/setup_install.md) — 依存インストール、API キー設定、dry-run の確認手順。
 - [CLI クイックスタート](howto/cli_quickstart.md) — 設定確認から実行、成果物閲覧までのひと通りの流れ。
+- [CLI 使い方カタログ（初心者向け）](howto/cli_usage_cookbook.md) — LLM 無効 baseline、マルチ目的可視化、ab-template などシナリオ別手順。
 - [Astraia 実験管理 GUI バックエンド利用ガイド](howto/gui_backend_usage.md) — FastAPI バックエンドの起動手順と主要エンドポイント、React フロントの開発方法。
 - [LLM あり/なし同時比較モードの使い方](howto/llm_comparison_mode.md) — LLM と古典ベースラインを同じ seed で走らせ、差分サマリを確認する手順。
 - [LLM ガイド付き QAOA 回路設計 実行手順](howto/qaoa_llm_runbook.md) — 依存インストール、実行コマンド、結果の見方。

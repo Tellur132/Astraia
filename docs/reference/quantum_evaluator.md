@@ -57,6 +57,6 @@ QFT テンプレートでは `metric_fidelity_noisy` / `metric_fidelity_delta`�
 
 - `log.csv`: 忠実度や深さなどのメトリクスが試行ごとに記録されます。
 - `report.md`: ベストトライアルの回路（メトリクス付き）と Pareto front の概要、LLM クリティックの診断を含みます。
-- `log_pareto.png` / `log_history.png`: `astraia visualize` コマンドで自動生成される PNG。忠実度と深さのトレードオフや収束速度を確認できます。
+- `visualization_pareto.png` / `visualization_history.png`: `astraia visualize` コマンドで自動生成される PNG（既定パス）。忠実度と深さのトレードオフや収束速度を確認できます。
 
 `runs compare --metric fidelity --stat best` で複数実行の忠実度を並べたり、`visualize --type pareto --metric fidelity --metric depth` で Pareto front を描画することで、量子回路の設計・改善を定量的に追跡できます。

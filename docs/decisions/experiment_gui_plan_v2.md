@@ -150,7 +150,7 @@
 - GUI から任意の run を選択し、
   - `report.md` を Markdown としてレンダリング表示
   - `log.csv` をテーブル + 簡易グラフ（ベスト値推移）で表示
-  - `log_history.png` / `log_pareto.png` が存在する場合はサムネイル表示
+  - `visualization_history.png` / `visualization_pareto.png` が存在する場合はサムネイル表示
 - 2 つ以上の run を選択して `runs diff` / `runs compare` 相当の結果要約を表示できる
 
 **主なタスク:**
