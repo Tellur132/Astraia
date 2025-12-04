@@ -39,6 +39,24 @@ from .llm_providers import (
     PromptMessage,
     ToolDefinition,
 )
+try:  # pragma: no cover - prefer real pydantic
+    from pydantic import (
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationError,
+        field_validator,
+        model_validator,
+    )
+except Exception:  # pragma: no cover - fallback shim
+    from ._compat.pydantic import (
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationError,
+        field_validator,
+        model_validator,
+    )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .llm_guidance import LLMProposalGenerator
@@ -54,6 +72,26 @@ _SUPPORTED_META_SAMPLERS = {
     "mocma",
     "nevergrad",
     "de",
+}
+
+_NORMALIZED_SUGGESTION_OPS = {
+    "increase": "increase",
+    "raise": "increase",
+    "up": "increase",
+    "decrease": "decrease",
+    "lower": "decrease",
+    "reduce": "decrease",
+    "widen": "widen",
+    "expand": "widen",
+    "broaden": "widen",
+    "narrow": "narrow",
+    "shrink": "narrow",
+    "tighten": "narrow",
+    "set": "set",
+    "fix": "set",
+    "shift": "shift",
+    "rescale": "shift",
+    "focus": "narrow",
 }
 
 
@@ -89,6 +127,7 @@ class MetaAdjustment:
     patience: int | None = None
     guidance_directives: List[str] = field(default_factory=list)
     search_space_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    suggestions: List[Dict[str, Any]] = field(default_factory=list)
     notes: str | None = None
     source: str = "heuristic"
 
@@ -146,6 +185,99 @@ class PolicyRule:
         )
 
 
+class _SuggestionModel(BaseModel):
+    """Structured suggestion entry for LLM plans."""
+
+    param: str
+    op: str
+    value: Any | None = None
+    rationale: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("param")
+    def _clean_param(cls, value: str) -> str:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("param required")
+        return text
+
+    @field_validator("op")
+    def _normalise_op(cls, value: str) -> str:
+        text = str(value).strip().lower()
+        mapped = _NORMALIZED_SUGGESTION_OPS.get(text)
+        if mapped is None:
+            raise ValueError(f"unsupported op '{value}'")
+        return mapped
+
+    @field_validator("rationale")
+    def _clean_rationale(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
+class _SearchSpaceOverrideModel(BaseModel):
+    """LLM-provided search space override payload."""
+
+    low: float | int | None = None
+    high: float | int | None = None
+    step: float | int | None = None
+    choices: List[Any] | None = None
+    default: Any | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _GuidancePayloadModel(BaseModel):
+    """Wrapper for guidance directives and search space overrides."""
+
+    directives: List[str] = Field(default_factory=list)
+    search_space: Dict[str, _SearchSpaceOverrideModel] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("directives", mode="after")
+    def _dedup_and_strip(cls, value: List[str]) -> List[str]:
+        cleaned: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+
+class _MetaPlanModel(BaseModel):
+    """Pydantic schema for LLM meta-plan responses."""
+
+    sampler: str | None = None
+    rescale: Dict[str, float] = Field(default_factory=dict)
+    trial_budget: int | None = None
+    max_trials: int | None = None
+    patience: int | None = None
+    guidance: _GuidancePayloadModel | None = None
+    notes: str | None = None
+    suggestions: List[_SuggestionModel] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("notes")
+    def _trim_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @model_validator(mode="after")
+    def _strip_empty_guidance(self) -> "_MetaPlanModel":
+        if self.guidance is not None:
+            if not self.guidance.directives and not self.guidance.search_space:
+                self.guidance = None
+        return self
+
+
 class MetaSearchAdjuster:
     """Periodically summarise progress and request strategy updates."""
 
@@ -182,6 +314,7 @@ class MetaSearchAdjuster:
         self._metric_name = metric_name
         self._metric_name_lc = metric_name.lower()
         self._search_space = {name: dict(spec) for name, spec in search_space.items()}
+        self._base_search_space = {name: dict(spec) for name, spec in search_space.items()}
         self._provider, self._usage_logger, self._trace_logger = create_llm_provider(llm_cfg)
         self._seed = seed
         self._policies = self._build_policies(policies or [])
@@ -558,10 +691,9 @@ class MetaSearchAdjuster:
             return None
 
         self._log_usage(result)
-        parsed = self._parse_plan(result.content, trials_completed, settings)
-        parse_info: Dict[str, Any] = {
-            "status": "ok" if parsed is not None else "error",
-        }
+        parsed, parse_info = self._parse_plan(result.content, trials_completed, settings)
+        if "status" not in parse_info:
+            parse_info["status"] = "ok" if parsed is not None else "error"
         self._log_exchange(
             prompt=prompt,
             system=self._SYSTEM_PROMPT,
@@ -911,110 +1043,328 @@ class MetaSearchAdjuster:
         payload: str,
         trials_completed: int,
         settings: SearchSettings,
-    ) -> MetaAdjustment | None:
+    ) -> tuple[MetaAdjustment | None, Dict[str, Any]]:
         try:
             data = json.loads(payload)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(data, MutableMapping):
-            return None
+        except json.JSONDecodeError as exc:
+            return None, {"status": "error", "reason": "json_decode", "message": str(exc)}
+        if not isinstance(data, Mapping):
+            return None, {"status": "error", "reason": "not_mapping"}
 
-        allowed_keys = {
-            "sampler",
-            "rescale",
-            "trial_budget",
-            "max_trials",
-            "patience",
-            "guidance",
-            "notes",
-        }
-        if any(key not in allowed_keys for key in data.keys()):
-            return None
+        try:
+            plan = _MetaPlanModel(**data)
+        except ValidationError as exc:
+            return None, {"status": "error", "reason": "schema", "errors": exc.errors()}
 
-        adjustment = MetaAdjustment()
+        adjustment, errors = self._validate_plan_semantics(
+            plan,
+            trials_completed=trials_completed,
+            settings=settings,
+        )
+        if errors:
+            return None, {"status": "error", "reason": "semantic", "errors": errors}
 
-        sampler = data.get("sampler")
-        if isinstance(sampler, str):
-            sampler_lc = sampler.lower()
-            if sampler_lc in _SUPPORTED_META_SAMPLERS:
-                adjustment.sampler = sampler_lc
-
-        rescale = data.get("rescale")
-        if isinstance(rescale, Mapping):
-            for name, value in rescale.items():
-                try:
-                    factor = float(value)
-                except (TypeError, ValueError):
-                    continue
-                if not (0.05 <= factor <= 1.0):
-                    continue
-                adjustment.rescale[name] = factor
-
-        trial_budget = data.get("trial_budget")
-        if isinstance(trial_budget, (int, float)):
-            trial_budget_int = int(trial_budget)
-            if trial_budget_int >= trials_completed:
-                adjustment.trial_budget = trial_budget_int
-
-        max_trials = data.get("max_trials")
-        if isinstance(max_trials, (int, float)):
-            max_trials_int = int(max_trials)
-            if max_trials_int >= trials_completed:
-                adjustment.max_trials = max_trials_int
-
-        patience = data.get("patience")
-        if patience is None:
-            adjustment.patience = None
-        elif isinstance(patience, (int, float)):
-            patience_int = int(patience)
-            if patience_int >= 0:
-                adjustment.patience = patience_int
-
-        guidance = data.get("guidance")
-        if isinstance(guidance, Mapping):
-            directives_payload = guidance.get("directives")
-            if isinstance(directives_payload, Sequence) and not isinstance(
-                directives_payload, (str, bytes, bytearray)
-            ):
-                directives: list[str] = []
-                for entry in directives_payload:
-                    text = str(entry).strip()
-                    if text:
-                        directives.append(text)
-                adjustment.guidance_directives = directives
-
-            overrides_payload = guidance.get("search_space")
-            if isinstance(overrides_payload, Mapping):
-                for name, override in overrides_payload.items():
-                    if not isinstance(override, Mapping):
-                        continue
-                    cleaned: Dict[str, Any] = {}
-                    for key in ("low", "high", "step", "choices", "default"):
-                        if key in override:
-                            cleaned[key] = override[key]
-                    if cleaned:
-                        adjustment.search_space_overrides[str(name)] = cleaned
-
-        notes = data.get("notes")
-        if isinstance(notes, str) and notes.strip():
-            adjustment.notes = notes.strip()
-
-        if (
-            adjustment.sampler
-            or adjustment.rescale
-            or adjustment.trial_budget is not None
-            or adjustment.max_trials is not None
-            or adjustment.patience is not None
-            or adjustment.guidance_directives
-            or adjustment.search_space_overrides
-            or adjustment.notes
-        ):
-            return adjustment
-        return None
+        return adjustment, {"status": "ok", "suggestions": len(plan.suggestions)}
 
     def _log_usage(self, result: LLMResult) -> None:
         if self._usage_logger is not None:
             self._usage_logger.log(result.usage)
+
+    def _validate_plan_semantics(
+        self,
+        plan: _MetaPlanModel,
+        *,
+        trials_completed: int,
+        settings: SearchSettings,
+    ) -> tuple[MetaAdjustment | None, List[str]]:
+        errors: list[str] = []
+
+        sampler = None
+        if plan.sampler is not None:
+            candidate = plan.sampler.lower()
+            if candidate in _SUPPORTED_META_SAMPLERS:
+                sampler = candidate
+            else:
+                errors.append(f"sampler_unsupported:{plan.sampler}")
+
+        validated_rescale: Dict[str, float] = {}
+        for name, factor in plan.rescale.items():
+            spec = self._search_space.get(name)
+            if spec is None:
+                errors.append(f"rescale_unknown:{name}")
+                continue
+            if not self._is_numeric_param(spec):
+                errors.append(f"rescale_non_numeric:{name}")
+                continue
+            try:
+                numeric_factor = float(factor)
+            except (TypeError, ValueError):
+                errors.append(f"rescale_not_numeric:{name}")
+                continue
+            if not math.isfinite(numeric_factor) or not (0.05 <= numeric_factor <= 1.0):
+                errors.append(f"rescale_out_of_range:{name}")
+                continue
+            validated_rescale[name] = numeric_factor
+
+        trial_budget = None
+        if plan.trial_budget is not None:
+            if int(plan.trial_budget) < trials_completed:
+                errors.append("trial_budget_before_progress")
+            else:
+                trial_budget = int(plan.trial_budget)
+
+        max_trials = None
+        if plan.max_trials is not None:
+            if int(plan.max_trials) < trials_completed:
+                errors.append("max_trials_before_progress")
+            else:
+                max_trials = int(plan.max_trials)
+
+        patience = plan.patience
+        if patience is not None and patience < 0:
+            errors.append("patience_negative")
+
+        overrides: Dict[str, Dict[str, Any]] = {}
+        directives: list[str] = []
+        if plan.guidance is not None:
+            directives = list(plan.guidance.directives)
+            for name, override in plan.guidance.search_space.items():
+                spec = self._search_space.get(name)
+                if spec is None:
+                    errors.append(f"override_unknown:{name}")
+                    continue
+                validated_override, override_errors = self._validate_override(
+                    name, override, spec
+                )
+                if override_errors:
+                    errors.extend(override_errors)
+                    continue
+                if validated_override:
+                    overrides[name] = validated_override
+
+        validated_suggestions, suggestion_errors = self._validate_suggestions(
+            plan.suggestions
+        )
+        errors.extend(suggestion_errors)
+
+        if errors:
+            return None, errors
+
+        return (
+            MetaAdjustment(
+                sampler=sampler,
+                rescale=validated_rescale,
+                trial_budget=trial_budget,
+                max_trials=max_trials,
+                patience=patience,
+                guidance_directives=directives,
+                search_space_overrides=overrides,
+                suggestions=validated_suggestions,
+                notes=plan.notes,
+                source="llm",
+            ),
+            [],
+        )
+
+    def _validate_override(
+        self,
+        name: str,
+        override: _SearchSpaceOverrideModel,
+        spec: Mapping[str, Any],
+    ) -> tuple[Dict[str, Any] | None, List[str]]:
+        errors: list[str] = []
+        validated: Dict[str, Any] = {}
+        param_type = str(spec.get("type", "")).lower()
+        base_low, base_high = self._base_bounds(name, spec=spec)
+
+        if param_type in {"float", "int"}:
+            is_int = param_type == "int"
+
+            low_value = self._coerce_numeric(override.low, is_int=is_int)
+            high_value = self._coerce_numeric(override.high, is_int=is_int)
+
+            if low_value is None:
+                low_value = self._coerce_numeric(spec.get("low"), is_int=is_int)
+            if high_value is None:
+                high_value = self._coerce_numeric(spec.get("high"), is_int=is_int)
+
+            if low_value is None or high_value is None:
+                errors.append(f"override_missing_bounds:{name}")
+                return None, errors
+
+            if float(high_value) <= float(low_value):
+                errors.append(f"override_inverted_range:{name}")
+                return None, errors
+
+            if base_low is not None and float(low_value) < float(base_low):
+                errors.append(f"override_below_base:{name}")
+            if base_high is not None and float(high_value) > float(base_high):
+                errors.append(f"override_above_base:{name}")
+
+            if override.low is not None:
+                validated["low"] = int(low_value) if is_int else float(low_value)
+            if override.high is not None:
+                validated["high"] = int(high_value) if is_int else float(high_value)
+
+            if override.step is not None:
+                step_value = self._coerce_numeric(override.step, is_int=is_int)
+                if step_value is None or float(step_value) <= 0:
+                    errors.append(f"override_invalid_step:{name}")
+                else:
+                    validated["step"] = int(step_value) if is_int else float(step_value)
+
+        elif param_type == "categorical":
+            choices = list(override.choices or [])
+            if not choices:
+                errors.append(f"override_choices_empty:{name}")
+            else:
+                base_choices = list(spec.get("choices", []))
+                if base_choices and not set(choices).issubset(set(base_choices)):
+                    errors.append(f"override_choices_outside:{name}")
+                else:
+                    validated["choices"] = choices
+        elif param_type == "llm_only":
+            default = override.default
+            if isinstance(default, str) and default.strip():
+                validated["default"] = default.strip()
+            else:
+                errors.append(f"override_invalid_default:{name}")
+        else:
+            errors.append(f"override_unsupported_type:{param_type}")
+
+        if errors:
+            return None, errors
+        if not validated:
+            return None, [f"override_empty:{name}"]
+        return validated, []
+
+    def _validate_suggestions(
+        self, suggestions: Sequence[_SuggestionModel]
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
+        validated: list[Dict[str, Any]] = []
+        errors: list[str] = []
+
+        for idx, suggestion in enumerate(suggestions):
+            spec = self._search_space.get(suggestion.param)
+            if spec is None:
+                errors.append(f"suggestion_unknown:{suggestion.param}")
+                continue
+            param_type = str(spec.get("type", "")).lower()
+            entry: Dict[str, Any] = {
+                "param": suggestion.param,
+                "op": suggestion.op,
+            }
+            if suggestion.rationale is not None:
+                entry["rationale"] = suggestion.rationale
+            if suggestion.confidence is not None:
+                entry["confidence"] = suggestion.confidence
+
+            if param_type in {"float", "int"}:
+                bounds = self._extract_numeric_range(
+                    suggestion.value, is_int=param_type == "int"
+                )
+                if bounds is None:
+                    errors.append(f"suggestion_numeric_invalid:{suggestion.param}")
+                    continue
+                low, high = bounds
+                base_low, base_high = self._base_bounds(suggestion.param, spec=spec)
+                if base_low is not None and low < float(base_low):
+                    errors.append(f"suggestion_below_base:{suggestion.param}")
+                    continue
+                if base_high is not None and high > float(base_high):
+                    errors.append(f"suggestion_above_base:{suggestion.param}")
+                    continue
+                entry["range"] = [low, high]
+                if math.isclose(low, high):
+                    entry["value"] = low
+            elif param_type == "categorical":
+                validated_choice = self._validate_categorical_value(
+                    suggestion.value, spec
+                )
+                if validated_choice is None:
+                    errors.append(f"suggestion_choice_invalid:{suggestion.param}")
+                    continue
+                entry["value"] = validated_choice
+            else:
+                # For llm_only or unknown types, accept textual hints only.
+                if suggestion.value is not None:
+                    entry["value"] = suggestion.value
+
+            validated.append(entry)
+
+        return validated, errors
+
+    def _validate_categorical_value(
+        self, value: Any, spec: Mapping[str, Any]
+    ) -> Any | None:
+        choices = list(spec.get("choices", []))
+        if not choices:
+            return None
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            cleaned = [item for item in value if item in choices]
+            if cleaned and set(cleaned).issubset(set(choices)):
+                return cleaned
+            return None
+        if value in choices:
+            return value
+        return None
+
+    def _is_numeric_param(self, spec: Mapping[str, Any]) -> bool:
+        return str(spec.get("type", "")).lower() in {"float", "int"}
+
+    def _base_bounds(
+        self, name: str, *, spec: Mapping[str, Any] | None = None
+    ) -> tuple[float | None, float | None]:
+        reference = self._base_search_space.get(name, spec or {})
+        low = reference.get("low")
+        high = reference.get("high")
+        try:
+            low_val = float(low) if low is not None else None
+        except (TypeError, ValueError):
+            low_val = None
+        try:
+            high_val = float(high) if high is not None else None
+        except (TypeError, ValueError):
+            high_val = None
+        return low_val, high_val
+
+    def _coerce_numeric(self, value: Any, *, is_int: bool) -> float | int | None:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric):
+            return None
+        if is_int:
+            if not numeric.is_integer():
+                return None
+            return int(numeric)
+        return float(numeric)
+
+    def _extract_numeric_range(
+        self, value: Any, *, is_int: bool
+    ) -> tuple[float, float] | None:
+        if value is None:
+            return None
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            if len(value) != 2:
+                return None
+            low = self._coerce_numeric(value[0], is_int=is_int)
+            high = self._coerce_numeric(value[1], is_int=is_int)
+        else:
+            low = self._coerce_numeric(value, is_int=is_int)
+            high = low
+        if low is None or high is None:
+            return None
+        if float(high) < float(low):
+            return None
+        return float(low), float(high)
 
     def _log_exchange(
         self,
@@ -1257,6 +1607,9 @@ def apply_meta_adjustment(
             settings.patience = new_patience
             label = "disabled" if new_patience is None else str(new_patience)
             messages.append(f"patience -> {label}")
+
+    if adjustment.suggestions:
+        messages.append(f"suggestions recorded ({len(adjustment.suggestions)})")
 
     if adjustment.notes:
         messages.append(adjustment.notes)

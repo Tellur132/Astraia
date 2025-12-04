@@ -127,6 +127,98 @@ def test_llm_plan_is_parsed() -> None:
     assert adjustment.notes == "集中探索"
 
 
+def test_invalid_llm_plan_falls_back_to_heuristic() -> None:
+    adjuster = MetaSearchAdjuster(
+        interval=1,
+        summary_window=1,
+        direction=optuna.study.StudyDirection.MINIMIZE,
+        metric_name="loss",
+        search_space=make_search_space(),
+        llm_cfg=None,
+        seed=99,
+    )
+    payload = json.dumps(
+        {
+            "sampler": "tpe",
+            "trial_budget": 5,
+            "max_trials": 6,
+            "guidance": {"search_space": {"depth": {"high": 10}}},
+        }
+    )
+    adjuster._provider = StubProvider([payload])  # type: ignore[attr-defined]
+    adjuster._usage_logger = None  # type: ignore[attr-defined]
+
+    settings = SearchSettings(sampler="tpe", max_trials=10, trial_budget=10, patience=3)
+    adjustment = adjuster.register_trial(
+        trial_number=0,
+        value=0.6,
+        improved=False,
+        params={"alpha": 0.6},
+        metrics={"loss": 0.6},
+        best_value=0.5,
+        best_params={"alpha": 0.5},
+        trials_completed=1,
+        settings=settings,
+    )
+
+    assert adjustment is not None
+    assert adjustment.source == "heuristic"
+    assert adjustment.sampler == "random"
+
+
+def test_llm_suggestions_are_validated() -> None:
+    adjuster = MetaSearchAdjuster(
+        interval=1,
+        summary_window=1,
+        direction=optuna.study.StudyDirection.MINIMIZE,
+        metric_name="score",
+        search_space=make_search_space(),
+        llm_cfg=None,
+        seed=7,
+    )
+    payload = json.dumps(
+        {
+            "sampler": "random",
+            "trial_budget": 4,
+            "max_trials": 6,
+            "patience": 2,
+            "guidance": {"directives": [], "search_space": {}},
+            "suggestions": [
+                {
+                    "param": "alpha",
+                    "op": "narrow",
+                    "value": [0.1, 0.3],
+                    "rationale": "focus on low alpha",
+                    "confidence": 0.8,
+                }
+            ],
+        }
+    )
+    adjuster._provider = StubProvider([payload])  # type: ignore[attr-defined]
+    adjuster._usage_logger = None  # type: ignore[attr-defined]
+
+    settings = SearchSettings(sampler="tpe", max_trials=8, trial_budget=8, patience=4)
+    adjustment = adjuster.register_trial(
+        trial_number=0,
+        value=0.4,
+        improved=True,
+        params={"alpha": 0.4},
+        metrics={"score": 0.4},
+        best_value=0.4,
+        best_params={"alpha": 0.4},
+        trials_completed=1,
+        settings=settings,
+    )
+
+    assert adjustment is not None
+    assert adjustment.source == "llm"
+    assert adjustment.suggestions
+    suggestion = adjustment.suggestions[0]
+    assert suggestion["op"] == "narrow"
+    assert suggestion["range"] == [0.1, 0.3]
+    assert suggestion.get("value") is None or suggestion["value"] in {0.1, 0.3}
+
+
 def test_apply_meta_adjustment_updates_settings() -> None:
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=10))
     search_cfg: dict[str, object] = {"sampler": "tpe"}

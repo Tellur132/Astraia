@@ -6,3 +6,4 @@ runs/
 reports/
 frontend/node_modules/
 frontend/dist/
+.vscode/
