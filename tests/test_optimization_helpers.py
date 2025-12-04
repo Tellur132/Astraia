@@ -12,6 +12,89 @@ import optuna
 from astraia import optimization
 
 
+class AdaptiveLLMUsageTests(unittest.TestCase):
+    def test_bandit_boosts_ratio_on_llm_improvement(self) -> None:
+        cfg = {
+            "enabled": True,
+            "mix_ratio": 0.1,
+            "mix_ratio_floor": 0.05,
+            "adaptive_max_ratio": 0.6,
+            "adaptive_usage_prior": 0.2,
+            "mix_ratio_decay": 0.5,
+        }
+        controller = optimization.LLMUsageOptimizer(
+            cfg,
+            direction_names=["minimize"],
+            no_improve_patience=10,
+            seed=2,
+        )
+
+        first = controller.update_after_trial(
+            study=None,
+            trials_completed=1,
+            is_llm_trial=True,
+            improved=True,
+            pareto_improved=False,
+            no_improve_counter=0,
+            pareto_no_improve_counter=None,
+        )
+        self.assertIsNotNone(first.ratio)
+        self.assertGreater(controller.current_ratio, 0.1)
+
+        second = controller.update_after_trial(
+            study=None,
+            trials_completed=2,
+            is_llm_trial=False,
+            improved=True,
+            pareto_improved=False,
+            no_improve_counter=0,
+            pareto_no_improve_counter=None,
+        )
+        self.assertIsNotNone(second.ratio)
+        first_ratio = first.ratio if first.ratio is not None else controller.current_ratio
+        self.assertLessEqual(controller.current_ratio, first_ratio)
+
+    def test_stagnation_triggers_forced_llm(self) -> None:
+        cfg = {
+            "enabled": True,
+            "mix_ratio": 0.05,
+            "mix_ratio_floor": 0.05,
+            "adaptive_max_ratio": 0.4,
+            "stagnation_trials": 2,
+            "stagnation_boost": 0.15,
+            "adaptive_cooldown_trials": 0,
+        }
+        controller = optimization.LLMUsageOptimizer(
+            cfg,
+            direction_names=["minimize", "minimize"],
+            no_improve_patience=None,
+            seed=3,
+        )
+
+        first = controller.update_after_trial(
+            study=None,
+            trials_completed=1,
+            is_llm_trial=False,
+            improved=False,
+            pareto_improved=False,
+            no_improve_counter=1,
+            pareto_no_improve_counter=1,
+        )
+        self.assertFalse(first.force_llm)
+
+        second = controller.update_after_trial(
+            study=None,
+            trials_completed=2,
+            is_llm_trial=False,
+            improved=False,
+            pareto_improved=False,
+            no_improve_counter=2,
+            pareto_no_improve_counter=2,
+        )
+        self.assertTrue(second.force_llm)
+        self.assertGreaterEqual(controller.current_ratio, 0.2)
+
+
 class OptimizationHelperTests(unittest.TestCase):
     def test_trial_failed_detects_non_ok_status(self) -> None:
         metrics = {"status": "error", "timed_out": False}

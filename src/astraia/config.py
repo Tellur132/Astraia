@@ -516,6 +516,15 @@ class LLMGuidanceConfig(BaseModel):
     hv_guard_margin: float = 0.0
     hv_guard_samples: int = 1200
     max_llm_trials: int | None = None
+    adaptive_usage: bool = True
+    adaptive_max_ratio: float = 0.8
+    adaptive_usage_prior: float = 0.2
+    stagnation_trials: int | None = None
+    pareto_stagnation_trials: int = 4
+    hv_plateau_rel_tol: float = 0.01
+    hv_plateau_window: int = 3
+    stagnation_boost: float = 0.2
+    adaptive_cooldown_trials: int = 2
 
     @model_validator(mode="after")
     def validate_fields(self) -> "LLMGuidanceConfig":
@@ -574,6 +583,24 @@ class LLMGuidanceConfig(BaseModel):
             raise ValueError("llm_guidance.hv_guard_samples must be positive")
         if self.max_llm_trials is not None and self.max_llm_trials <= 0:
             raise ValueError("llm_guidance.max_llm_trials must be positive when provided")
+        if not (0.0 < self.adaptive_max_ratio <= 1.0):
+            raise ValueError("llm_guidance.adaptive_max_ratio must be between 0 and 1")
+        if self.adaptive_max_ratio < self.mix_ratio_floor:
+            raise ValueError("llm_guidance.adaptive_max_ratio must be >= mix_ratio_floor")
+        if self.adaptive_usage_prior < 0:
+            raise ValueError("llm_guidance.adaptive_usage_prior must be non-negative")
+        if self.stagnation_trials is not None and self.stagnation_trials <= 0:
+            raise ValueError("llm_guidance.stagnation_trials must be positive when provided")
+        if self.pareto_stagnation_trials <= 0:
+            raise ValueError("llm_guidance.pareto_stagnation_trials must be positive")
+        if self.hv_plateau_rel_tol < 0:
+            raise ValueError("llm_guidance.hv_plateau_rel_tol must be non-negative")
+        if self.hv_plateau_window <= 0:
+            raise ValueError("llm_guidance.hv_plateau_window must be positive")
+        if self.stagnation_boost < 0:
+            raise ValueError("llm_guidance.stagnation_boost must be non-negative")
+        if self.adaptive_cooldown_trials < 0:
+            raise ValueError("llm_guidance.adaptive_cooldown_trials must be non-negative")
         return self
 
 

@@ -97,6 +97,15 @@ class LLMTrialScheduler:
     def current_mix_ratio(self) -> float:
         return self._current_mix_ratio
 
+    @property
+    def max_llm_trials(self) -> int | None:
+        return self._max_llm_trials
+
+    def has_capacity(self) -> bool:
+        """Return whether additional LLM trials are allowed under the configured cap."""
+
+        return self._max_llm_trials is None or self._llm_trials < self._max_llm_trials
+
     def allow_llm(self, trials_completed: int) -> bool:
         if self._max_llm_trials is not None and self._llm_trials >= self._max_llm_trials:
             return False
@@ -126,6 +135,250 @@ class LLMTrialScheduler:
 
         target = self._current_mix_ratio * self._mix_ratio_decay
         return self.update_mix_ratio(target)
+
+
+@dataclass
+class LLMUsageDecision:
+    """Outcome of an adaptive LLM usage update."""
+
+    ratio: float | None = None
+    force_llm: bool = False
+    reason: str | None = None
+    hypervolume: float | None = None
+
+
+class LLMUsageOptimizer:
+    """Bandit-like controller that adapts LLM usage probability and triggers."""
+
+    def __init__(
+        self,
+        cfg: Mapping[str, Any] | None,
+        *,
+        direction_names: Sequence[str],
+        no_improve_patience: int | None,
+        seed: int | None,
+    ) -> None:
+        cfg = cfg or {}
+        self.enabled = bool(cfg.get("adaptive_usage", True))
+        self._floor = max(0.0, float(cfg.get("mix_ratio_floor", 0.1)))
+        ceiling_value = cfg.get("adaptive_max_ratio", 0.8)
+        self._ceiling = min(1.0, max(self._floor, float(ceiling_value)))
+        self._decay = max(0.0, min(1.0, float(cfg.get("mix_ratio_decay", 0.5))))
+        prior = float(cfg.get("adaptive_usage_prior", 0.2))
+        self._bandit_prior = prior if prior > 0 else 0.1
+        self._stagnation_boost = max(0.0, float(cfg.get("stagnation_boost", 0.2)))
+        cooldown = int(cfg.get("adaptive_cooldown_trials", 2))
+        self._cooldown_trials = cooldown if cooldown >= 0 else 0
+        stagnation_value = cfg.get("stagnation_trials")
+        if stagnation_value is None:
+            derived = int(math.ceil((no_improve_patience or 8) * 0.6))
+            stagnation_value = max(4, derived)
+        self._stagnation_trials = int(stagnation_value) if stagnation_value else None
+        pareto_patience = int(cfg.get("pareto_stagnation_trials", 4))
+        self._pareto_patience = pareto_patience if pareto_patience > 0 else None
+        hv_window = int(cfg.get("hv_plateau_window", 3))
+        hv_window = hv_window if hv_window > 0 else 3
+        hv_interval = int(cfg.get("hv_guard_interval", 6))
+        hv_interval = hv_interval if hv_interval > 0 else 6
+        self._hv_patience = hv_interval * hv_window
+        self._hv_tol = max(0.0, float(cfg.get("hv_plateau_rel_tol", 0.01)))
+        self._hv_samples = int(cfg.get("hv_guard_samples", 1200) or 1200)
+        self._hv_interval = hv_interval
+        self._seed = seed if isinstance(seed, int) else None
+        self._rng = random.Random(seed)
+        self._directions = list(direction_names)
+
+        start_ratio = cfg.get("mix_ratio", self._floor)
+        self._current_ratio = min(self._ceiling, max(self._floor, float(start_ratio)))
+        self._llm_success = 0
+        self._llm_trials = 0
+        self._baseline_success = 0
+        self._baseline_trials = 0
+        self._last_force: int | None = None
+        self._hv_best: float | None = None
+        self._hv_best_trial: int | None = None
+        self._multiobjective = len(direction_names) > 1
+
+    @property
+    def current_ratio(self) -> float:
+        return self._current_ratio
+
+    def apply_external_ratio(self, ratio: float) -> float:
+        """Synchronise the internal ratio with an external adjustment."""
+
+        clamped = min(self._ceiling, max(self._floor, float(ratio)))
+        self._current_ratio = clamped
+        return self._current_ratio
+
+    def update_after_trial(
+        self,
+        *,
+        study: optuna.study.Study | None,
+        trials_completed: int,
+        is_llm_trial: bool,
+        improved: bool,
+        pareto_improved: bool,
+        no_improve_counter: int,
+        pareto_no_improve_counter: int | None,
+        hypervolume: float | None = None,
+    ) -> LLMUsageDecision:
+        if not self.enabled:
+            return LLMUsageDecision()
+
+        ratio_before = self._current_ratio
+        if is_llm_trial:
+            self._llm_trials += 1
+            if improved:
+                self._llm_success += 1
+                self._boost_ratio()
+            else:
+                self._decay_ratio()
+        else:
+            self._baseline_trials += 1
+            if improved:
+                self._baseline_success += 1
+                self._decay_ratio()
+
+        hv_value = self._maybe_track_hypervolume(
+            study=study,
+            trials_completed=trials_completed,
+            hypervolume=hypervolume,
+        )
+        reason = self._stagnation_reason(
+            trials_completed=trials_completed,
+            no_improve_counter=no_improve_counter,
+            pareto_no_improve_counter=pareto_no_improve_counter,
+        )
+        force_llm = False
+        if reason is not None:
+            force_llm = True
+            self._last_force = trials_completed
+            boosted = max(self._current_ratio, self._floor + self._stagnation_boost)
+            self._current_ratio = min(self._ceiling, boosted)
+
+        ratio_changed = not math.isclose(self._current_ratio, ratio_before, rel_tol=1e-9)
+        return LLMUsageDecision(
+            ratio=self._current_ratio if ratio_changed else None,
+            force_llm=force_llm,
+            reason=reason,
+            hypervolume=hv_value,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _decay_ratio(self) -> None:
+        decayed = self._current_ratio * self._decay
+        if decayed < self._current_ratio:
+            self._current_ratio = max(self._floor, decayed)
+
+    def _boost_ratio(self) -> None:
+        target = self._bandit_target()
+        if target > self._current_ratio:
+            self._current_ratio = min(self._ceiling, target)
+
+    def _bandit_target(self) -> float:
+        llm_alpha = 1.0 + self._bandit_prior + self._llm_success
+        llm_beta = 1.0 + self._bandit_prior + (self._llm_trials - self._llm_success)
+        base_alpha = 1.0 + self._bandit_prior + self._baseline_success
+        base_beta = 1.0 + self._bandit_prior + (
+            self._baseline_trials - self._baseline_success
+        )
+        llm_score = self._rng.betavariate(llm_alpha, llm_beta)
+        base_score = self._rng.betavariate(base_alpha, base_beta)
+        if llm_score <= base_score:
+            return self._floor
+        advantage = llm_score - base_score
+        span = self._ceiling - self._floor
+        return max(self._floor, min(self._ceiling, self._floor + advantage * span))
+
+    def _maybe_track_hypervolume(
+        self,
+        *,
+        study: optuna.study.Study | None,
+        trials_completed: int,
+        hypervolume: float | None,
+    ) -> float | None:
+        hv_value = hypervolume
+        if (
+            hv_value is None
+            and self._multiobjective
+            and self._hv_interval > 0
+            and trials_completed % self._hv_interval == 0
+        ):
+            hv_value = self._compute_hypervolume(study)
+
+        if hv_value is None:
+            return None
+
+        if not math.isfinite(hv_value):
+            return None
+
+        if self._hv_best is None or hv_value > self._hv_best * (1.0 + self._hv_tol):
+            self._hv_best = hv_value
+            self._hv_best_trial = trials_completed
+        return hv_value
+
+    def _compute_hypervolume(self, study: optuna.study.Study | None) -> float | None:
+        if study is None:
+            return None
+        trials = study.get_trials(deepcopy=False)
+        if not trials:
+            return None
+        objective_count = len(self._directions) if self._directions else len(trials[0].values or [])
+        if objective_count < 2:
+            return None
+        points = _collect_objective_points(study, objective_count)
+        if not points:
+            return None
+        directions = self._directions
+        if len(directions) > objective_count:
+            directions = directions[:objective_count]
+        if len(directions) < objective_count:
+            directions = list(directions) + ["minimize"] * (objective_count - len(directions))
+        pareto = _pareto_front_from_points(points, directions)
+        return _approximate_hypervolume(
+            pareto_points=pareto or points,
+            all_points=points,
+            direction_names=directions,
+            seed=self._seed,
+            samples=self._hv_samples,
+        )
+
+    def _stagnation_reason(
+        self,
+        *,
+        trials_completed: int,
+        no_improve_counter: int,
+        pareto_no_improve_counter: int | None,
+    ) -> str | None:
+        if (
+            self._last_force is not None
+            and self._cooldown_trials > 0
+            and trials_completed - self._last_force <= self._cooldown_trials
+        ):
+            return None
+
+        if self._stagnation_trials is not None and no_improve_counter >= int(
+            self._stagnation_trials
+        ):
+            return "best_plateau"
+
+        if (
+            self._pareto_patience is not None
+            and pareto_no_improve_counter is not None
+            and pareto_no_improve_counter >= self._pareto_patience
+        ):
+            return "pareto_plateau"
+
+        if (
+            self._hv_patience is not None
+            and self._hv_best_trial is not None
+            and trials_completed - self._hv_best_trial >= self._hv_patience
+        ):
+            return "hypervolume_plateau"
+
+        return None
 
 
 class DiversityGuard:
@@ -465,6 +718,16 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         min_pareto_points=diversity_guard.min_pareto_points,
         seed=seed if isinstance(seed, int) else None,
     )
+    usage_optimizer = (
+        LLMUsageOptimizer(
+            config.get("llm_guidance"),
+            direction_names=direction_names,
+            no_improve_patience=settings.patience,
+            seed=seed if isinstance(seed, int) else None,
+        )
+        if proposal_generator is not None
+        else None
+    )
 
     log_file = Path(config.get("artifacts", {}).get("log_file", "runs/log.csv"))
 
@@ -488,6 +751,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         history_notes=strategy_notes,
         notes=context_note,
     )
+    force_llm_next = False
+    pareto_no_improve_counter: int | None = 0 if len(direction_names) > 1 else None
 
     with TrialLogger(
         log_file,
@@ -516,6 +781,9 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     early_stop_reason = "max_time_minutes reached"
                     break
 
+            forced_llm = force_llm_next
+            force_llm_next = False
+
             diversity_plans = diversity_guard.plan_enqueues(trials_completed)
             for payload, source in diversity_plans:
                 fingerprint = fingerprint_proposal(payload)
@@ -539,8 +807,21 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
             llm_paused_for_diversity = diversity_block
 
             llm_allowed = proposal_generator is not None and not diversity_block
+            if (
+                llm_allowed
+                and llm_scheduler is not None
+                and usage_optimizer is not None
+                and llm_scheduler.mode == "mixed"
+            ):
+                llm_scheduler.update_mix_ratio(usage_optimizer.current_ratio)
+            scheduler_allows = True
             if llm_allowed and llm_scheduler is not None:
-                llm_allowed = llm_scheduler.allow_llm(trials_completed)
+                if forced_llm:
+                    scheduler_allows = llm_scheduler.has_capacity()
+                else:
+                    scheduler_allows = llm_scheduler.allow_llm(trials_completed)
+            llm_allowed = llm_allowed and scheduler_allows
+            forced_llm = forced_llm and llm_allowed
 
             if llm_allowed and proposal_generator is not None:
                 proposal_generator.update_context(llm_context)
@@ -666,6 +947,12 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
             else:
                 no_improve_counter += 1
 
+            if pareto_no_improve_counter is not None:
+                if pareto_improved:
+                    pareto_no_improve_counter = 0
+                else:
+                    pareto_no_improve_counter += 1
+
             if cost_metric is not None:
                 cost_value = metrics.get(cost_metric)
                 if cost_value is None:
@@ -712,6 +999,34 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     if messages:
                         print(f"[meta:{adjustment.source}] " + " | ".join(messages))
 
+            usage_decision = None
+            if usage_optimizer is not None:
+                usage_decision = usage_optimizer.update_after_trial(
+                    study=study,
+                    trials_completed=trials_completed,
+                    is_llm_trial=is_llm_trial,
+                    improved=improved,
+                    pareto_improved=pareto_improved,
+                    no_improve_counter=no_improve_counter,
+                    pareto_no_improve_counter=pareto_no_improve_counter,
+                )
+                if (
+                    usage_decision.ratio is not None
+                    and llm_scheduler is not None
+                    and llm_scheduler.mode == "mixed"
+                ):
+                    prev_ratio = llm_scheduler.current_mix_ratio
+                    updated_ratio = llm_scheduler.update_mix_ratio(usage_decision.ratio)
+                    if not math.isclose(updated_ratio, prev_ratio, rel_tol=1e-9):
+                        note = usage_decision.reason or "bandit_gain"
+                        print(
+                            f"[llm-usage] mix {prev_ratio:.2f}->{updated_ratio:.2f} ({note})"
+                        )
+                if usage_decision is not None and usage_decision.force_llm:
+                    force_llm_next = True
+                    if usage_decision.reason:
+                        print(f"[llm-usage] Triggering LLM due to {usage_decision.reason}")
+
             llm_context = _build_llm_context(
                 metric_names=metric_names,
                 directions=direction_names,
@@ -737,6 +1052,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                     new_ratio, reason, hv_all, hv_baseline = hv_adjustment
                     previous_ratio = llm_scheduler.current_mix_ratio
                     updated_ratio = llm_scheduler.update_mix_ratio(new_ratio)
+                    if usage_optimizer is not None:
+                        usage_optimizer.apply_external_ratio(updated_ratio)
                     if updated_ratio < previous_ratio:
                         message = (
                             f"[diversity] {reason or 'hv_guard'}: "
