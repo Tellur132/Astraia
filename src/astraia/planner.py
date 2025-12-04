@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, Mapping, MutableMapping
+from typing import Any, Dict, Mapping, MutableMapping, Sequence
 from uuid import uuid4
 
 from .llm_guidance import create_llm_provider
@@ -107,6 +107,8 @@ class LLMPlanner(BasePlanner):
         trace_logger: LLMExchangeLogger | None,
         fallback: RuleBasedPlanner,
         extra_directives: str | None = None,
+        knowledge_hints: Sequence[str] | None = None,
+        fewshot_examples: Sequence[str] | None = None,
     ) -> None:
         self._search_space = {name: dict(spec) for name, spec in search_space.items()}
         self._prompt_template = prompt_template
@@ -116,6 +118,8 @@ class LLMPlanner(BasePlanner):
         self._fallback = fallback
         self._extra_directives = extra_directives
         self._tool_schema: ToolDefinition | None = None
+        self._knowledge_hints = list(knowledge_hints) if knowledge_hints else []
+        self._fewshot_examples = list(fewshot_examples) if fewshot_examples else []
 
     def generate_strategy(self, context: LLMRunContext) -> PlannerStrategy:
         if self._provider is None:
@@ -228,6 +232,16 @@ class LLMPlanner(BasePlanner):
             lines.append("[Additional directives]")
             lines.append(self._extra_directives.strip())
             lines.append("")
+        if self._knowledge_hints:
+            lines.append("[Reusable strategies from past runs]")
+            lines.extend(f"- {hint}" for hint in self._knowledge_hints)
+            lines.append("")
+        if self._fewshot_examples:
+            lines.append("[Few-shot examples that worked]")
+            for idx, example in enumerate(self._fewshot_examples, start=1):
+                lines.append(f"Example {idx}:")
+                lines.append(example)
+                lines.append("")
         lines.append("Return JSON with fields objectives/emphasis/parameter_focus/batch_size_hint/notes.")
         content = "\n".join(lines)
         return Prompt(messages=[PromptMessage(role="user", content=content)])
@@ -310,6 +324,8 @@ def create_planner_agent(
     llm_cfg: Mapping[str, Any] | None,
     *,
     search_space: Mapping[str, Mapping[str, Any]],
+    knowledge_hints: Sequence[str] | None = None,
+    fewshot_examples: Sequence[str] | None = None,
 ) -> BasePlanner | None:
     """Instantiate the configured planner agent if enabled."""
 
@@ -348,6 +364,8 @@ def create_planner_agent(
         trace_logger=trace_logger,
         fallback=fallback,
         extra_directives=extra_directives,
+        knowledge_hints=knowledge_hints,
+        fewshot_examples=fewshot_examples,
     )
 
 

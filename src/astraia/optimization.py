@@ -27,6 +27,14 @@ from .meta_search import (
 )
 from .planner import create_planner_agent
 from .run_summary import write_run_summary
+from .strategy_catalog import (
+    collect_runs_to_catalog,
+    infer_problem_type,
+    load_fewshot_examples,
+    load_strategy_notes,
+    record_strategy_entry,
+    resolve_catalog_path,
+)
 
 
 @dataclass
@@ -376,6 +384,32 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
     metric_names, direction_names = _collect_search_objectives(search_cfg)
     primary_metric = metric_names[0]
 
+    problem_type, problem_tags = infer_problem_type(config)
+    artifacts_cfg = config.get("artifacts") or {}
+    catalog_path = resolve_catalog_path(artifacts_cfg)
+    run_root_value = artifacts_cfg.get("run_root")
+    runs_root = Path(run_root_value).parent if run_root_value else Path("runs")
+    try:
+        collect_runs_to_catalog(
+            runs_root=runs_root,
+            catalog_path=catalog_path,
+            problem_filter=problem_type,
+        )
+    except Exception as exc:
+        print(f"[warning] Failed to refresh strategy catalog: {exc}")
+    strategy_notes = load_strategy_notes(
+        problem_type,
+        catalog_path=catalog_path,
+        top_k=3,
+    )
+    fewshot_examples = load_fewshot_examples(problem_type)
+    context_note_parts = [f"problem_type={problem_type}"]
+    for key, value in (problem_tags or {}).items():
+        if value is None:
+            continue
+        context_note_parts.append(f"{key}={value}")
+    context_note = "; ".join(context_note_parts)
+
     sampler = build_sampler(search_cfg, seed)
     study = create_study(search_cfg, sampler, direction_names, seed=seed)
 
@@ -417,6 +451,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         config.get("planner"),
         config.get("llm"),
         search_space=search_space,
+        knowledge_hints=strategy_notes,
+        fewshot_examples=fewshot_examples,
     )
     diversity_guard = DiversityGuard(
         config.get("diversity_guard"),
@@ -449,6 +485,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         best_params=best_params,
         best_metrics=best_metrics,
         trials_completed=0,
+        history_notes=strategy_notes,
+        notes=context_note,
     )
 
     with TrialLogger(
@@ -680,6 +718,8 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
                 best_params=best_params,
                 best_metrics=best_metrics,
                 trials_completed=trials_completed,
+                history_notes=strategy_notes,
+                notes=context_note,
             )
 
             if (
@@ -793,6 +833,17 @@ def run_optimization(config: Mapping[str, Any]) -> OptimizationResult:
         )
     except Exception as exc:  # noqa: BLE001 - best-effort summary
         print(f"[warning] Failed to write run summary: {exc}")
+
+    try:
+        record_strategy_entry(
+            problem_type=problem_type,
+            config=config,
+            summary=summary_payload or {},
+            log_path=log_file,
+            catalog_path=catalog_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - catalog best-effort
+        print(f"[warning] Failed to update strategy catalog: {exc}")
 
     return OptimizationResult(
         trials_completed=trials_completed,
@@ -1445,6 +1496,8 @@ def _build_llm_context(
     best_params: Mapping[str, Any],
     best_metrics: Mapping[str, MetricValue],
     trials_completed: int,
+    history_notes: Sequence[str] | None = None,
+    notes: str | None = None,
 ) -> LLMRunContext:
     objectives: list[LLMObjective] = []
     for idx, name in enumerate(metric_names):
@@ -1474,6 +1527,8 @@ def _build_llm_context(
         objectives=objectives,
         current_best=current_best,
         trials_completed=trials_completed or None,
+        history_notes=list(history_notes) if history_notes else [],
+        notes=notes,
     )
 
 
